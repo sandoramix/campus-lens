@@ -491,8 +491,9 @@
 		return esc((a + b).toUpperCase());
 	}
 
-	const photoUrl = (u) => u.image?.versions?.medium || u.image?.link || null;
-	const largePhotoUrl = (u) => u.image?.versions?.large || u.image?.link || photoUrl(u);
+	const proxied = (url) => url ? `/img?u=${encodeURIComponent(url)}` : null;
+	const photoUrl = (u) => proxied(u.image?.versions?.medium || u.image?.link);
+	const largePhotoUrl = (u) => proxied(u.image?.versions?.large || u.image?.link) || photoUrl(u);
 
 	/** Uncropped photo on top of a blurred copy of itself; clicking it opens the lightbox. */
 	function photo(u) {
@@ -507,7 +508,7 @@
 	const zoomAttrs = (u) => photoUrl(u) ? `data-act="zoom" data-id="${u.id}" title="Enlarge photo"` : '';
 
 	function avatar(u, size = '') {
-		const src = u.image?.versions?.small || u.image?.link;
+		const src = proxied(u.image?.versions?.small || u.image?.link);
 		return `<span class="avatar ${size}">${initials(u)}${src ? `<img src="${esc(src)}" alt="" loading="lazy" onerror="this.remove()">` : ''}</span>`;
 	}
 
@@ -1608,7 +1609,8 @@
 				const href = browsableUrl(v);
 				if (!href) return `<span class="text-2" title="42 API link (needs a token)">${esc(v)}</span>`;
 				const img = /\.(jpe?g|png|gif|svg|webp)$/i.test(v);
-				return `${img ? `<img class="kv-thumb" src="${esc(v)}" alt="" loading="lazy" onerror="this.remove()">` : ''}${extLink(href, esc(href), href !== v ? `Intra profile (the API link ${v} needs a token)` : '')}`;
+				const thumbSrc = v.startsWith('https://cdn.intra.42.fr/') ? proxied(v) : v;
+				return `${img ? `<img class="kv-thumb" src="${esc(thumbSrc)}" alt="" loading="lazy" onerror="this.remove()">` : ''}${extLink(href, esc(href), href !== v ? `Intra profile (the API link ${v} needs a token)` : '')}`;
 			}
 			if (/(^|\.)email$/.test(r.key) && v.includes('@')) return `${mailLink(v)} ${fv(r.key, v)}`;
 			if (ISO_DATE.test(v)) return fv(r.key, v, `${esc(fmtDateTime(v))} <span class="muted">· ${esc(fmtRel(v))}</span>`);

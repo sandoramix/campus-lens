@@ -2,7 +2,10 @@ import json
 import logging
 import os
 import glob
+import hashlib
+import mimetypes
 import threading
+from urllib.parse import urlsplit
 from flask import Flask, Response, jsonify, render_template, request, send_from_directory
 import time
 from collections import defaultdict
@@ -11,6 +14,17 @@ import re
 import requests
 
 from api import API
+
+log = logging.getLogger("42stalk.web")
+
+if os.environ.get("STALK_IMG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
+	log.setLevel(logging.WARNING)
+
+	class _HideImgAccessLog(logging.Filter):
+		def filter(self, record):
+			return '"GET /img' not in record.getMessage()
+
+	logging.getLogger("werkzeug").addFilter(_HideImgAccessLog())
 
 SERVER_PORT = 8080
 
@@ -1080,6 +1094,167 @@ def DefaultCampusAPI():
 @app.route("/")
 def Homepage():
 	return render_template("index.html")
+
+#-------------------------------------------------------------------------------
+# IMAGE PROXY
+
+IMG_CACHE_DIR = os.path.join(DATA_DIR, "img_cache")
+IMG_MAX_BYTES = 10 * 1024 * 1024
+IMG_TIMEOUT = (5, 15)
+IMG_CACHE_MAX_BYTES = int(os.environ.get("STALK_IMG_CACHE_MB", "1024")) * 1024 * 1024
+IMG_RESP_HEADERS = {
+	"Cache-Control": "public, max-age=86400",
+	"X-Content-Type-Options": "nosniff",
+}
+
+def _parse_img_hosts(raw):
+	hosts = {h.strip().lower() for h in raw.split(",") if h.strip()}
+	return hosts or {".42.fr"}
+
+IMG_ALLOWED_HOSTS = _parse_img_hosts(os.environ.get("STALK_IMG_HOSTS", ".42.fr"))
+
+def img_is_allowed(url):
+	try:
+		parts = urlsplit(url)
+	except ValueError:
+		return False
+	if parts.scheme != "https":
+		return False
+	host = (parts.hostname or "").lower()
+	if not host:
+		return False
+	for entry in IMG_ALLOWED_HOSTS:
+		if entry.startswith("."):
+			if host == entry[1:] or host.endswith(entry):
+				return True
+		elif host == entry:
+			return True
+	return False
+
+def img_cache_path(url):
+	digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+	ext = os.path.splitext(urlsplit(url).path)[1].lower()
+	if ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
+		ext = ".jpg"
+	return os.path.join(IMG_CACHE_DIR, digest + ext)
+
+_img_evict_lock = threading.Lock()
+_img_last_evict = 0.0
+IMG_EVICT_INTERVAL = 30
+
+def img_cache_evict():
+	global _img_last_evict
+	if IMG_CACHE_MAX_BYTES <= 0:
+		return
+	if (time.monotonic() - _img_last_evict) < IMG_EVICT_INTERVAL:
+		return
+	if not _img_evict_lock.acquire(blocking=False):
+		return
+	try:
+		_img_last_evict = time.monotonic()
+		entries, total = [], 0
+		try:
+			with os.scandir(IMG_CACHE_DIR) as it:
+				for e in it:
+					if e.name.endswith(".tmp") or not e.is_file():
+						continue
+					try:
+						st = e.stat()
+					except OSError:
+						continue
+					entries.append((st.st_mtime, st.st_size, e.path))
+					total += st.st_size
+		except FileNotFoundError:
+			return
+		if total <= IMG_CACHE_MAX_BYTES:
+			return
+		low_water = int(IMG_CACHE_MAX_BYTES * 0.9)
+		entries.sort()
+		freed = removed = 0
+		for _mtime, size, path in entries:
+			if total - freed <= low_water:
+				break
+			try:
+				os.remove(path)
+				freed += size
+				removed += 1
+			except OSError:
+				pass
+		if removed:
+			log.info("img_proxy: evicted %d files (%d bytes); cache ~%d/%d bytes",
+			         removed, freed, total - freed, IMG_CACHE_MAX_BYTES)
+	finally:
+		_img_evict_lock.release()
+
+@app.route("/img")
+def img_proxy():
+	url = request.args.get("u", "")
+	if not img_is_allowed(url):
+		log.info("img_proxy: rejected disallowed url: %r", url[:200])
+		return Response(status=400)
+
+	cache_path = img_cache_path(url)
+	cached_ctype = mimetypes.guess_type(cache_path)[0] or "image/jpeg"
+
+	if os.path.exists(cache_path):
+		try:
+			with open(cache_path, "rb") as f:
+				body = f.read()
+			try:
+				os.utime(cache_path, None)
+			except OSError:
+				pass
+			log.debug("img_proxy: HIT %s (%d bytes) %s", os.path.basename(cache_path), len(body), url)
+			return Response(body, content_type=cached_ctype, headers=IMG_RESP_HEADERS)
+		except OSError as e:
+			log.warning("img_proxy: cache read failed for %s, re-fetching: %s", cache_path, e)
+
+	log.debug("img_proxy: MISS %s", url)
+	started = time.monotonic()
+	try:
+		r = API.session.get(url, headers=API._Api42__getTokenHeader(),
+		                    timeout=IMG_TIMEOUT, stream=True, allow_redirects=False)
+	except requests.RequestException as e:
+		log.warning("img_proxy: upstream request failed for %s: %s", url, e)
+		return Response(status=502)
+
+	with r:
+		elapsed_ms = (time.monotonic() - started) * 1000
+		if r.status_code != 200:
+			level = logging.INFO if r.status_code == 404 else logging.WARNING
+			log.log(level, "img_proxy: upstream %d in %.0fms for %s", r.status_code, elapsed_ms, url)
+			return Response(status=502 if 300 <= r.status_code < 400 else r.status_code)
+
+		ctype = (r.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+		if not ctype.startswith("image/"):
+			log.warning("img_proxy: upstream returned non-image %r for %s", ctype, url)
+			return Response(status=502)
+
+		buf = bytearray()
+		try:
+			for chunk in r.iter_content(65536):
+				buf.extend(chunk)
+				if len(buf) > IMG_MAX_BYTES:
+					log.warning("img_proxy: upstream body exceeded %d bytes for %s", IMG_MAX_BYTES, url)
+					return Response(status=502)
+		except requests.RequestException as e:
+			log.warning("img_proxy: upstream read failed for %s: %s", url, e)
+			return Response(status=502)
+
+	body = bytes(buf)
+	log.info("img_proxy: FETCH 200 (%d bytes, %s) in %.0fms %s", len(body), ctype, elapsed_ms, url)
+
+	try:
+		os.makedirs(IMG_CACHE_DIR, exist_ok=True)
+		tmp = f"{cache_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+		with open(tmp, "wb") as f:
+			f.write(body)
+		os.replace(tmp, cache_path)
+		img_cache_evict()
+	except OSError as e:
+		log.warning("img_proxy: could not cache %s: %s", url, e)
+
+	return Response(body, content_type=ctype, headers=IMG_RESP_HEADERS)
 
 #-------------------------------------------------------------------------------
 

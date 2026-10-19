@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 pyenv
 data
+img_cache/
 .vscode
 # C extensions
 *.so
