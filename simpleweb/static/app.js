@@ -139,6 +139,9 @@
 	const OPS = [['~', 'contains'], ['==', 'is'], ['!=', 'is not'], ['>', '>'], ['>=', '≥'], ['<', '<'], ['<=', '≤']];
 	const OP_SYMBOL = { '~': '∋', '==': '=', '!=': '≠', '>': '>', '>=': '≥', '<': '<', '<=': '≤' };
 	const KNOWN_STATUSES = ['finished', 'in_progress', 'waiting_for_correction', 'searching_a_group', 'creating_group', 'waiting_to_start', 'parent'];
+	const ACTIVE_STATUSES = ['in_progress', 'waiting_for_correction', 'searching_a_group', 'creating_group', 'waiting_to_start'];
+	const MONITOR_INTERVALS = [60, 300, 600, 1800, 3600];
+	const fmtInterval = (s) => s >= 3600 ? `${s / 3600}h` : s >= 60 ? `${s / 60}m` : `${s}s`;
 
 	const KIND = {
 		exams: { name: 'examname', prefix: 'exam', label: 'Exam', labels: 'Exams', icon: 'fa-graduation-cap' },
@@ -243,6 +246,7 @@
 		explorer: { exams: newExplorer(), projects: newExplorer() },
 
 		drawer: { id: null, tab: 'overview', q: '', status: '', onlyMatching: false, sort: { key: 'date', dir: 'desc' }, nav: [] },
+		monitor: { on: false, interval: [60, 300, 600, 1800, 3600].includes(store.get('monitorInterval', 300)) ? store.get('monitorInterval', 300) : 300, timer: null, ticking: false, lastTick: null, lastError: null, changed: new Set() },
 		panelOpen: false,
 		fieldRows: [],
 		menu: null,
@@ -322,7 +326,7 @@
 	let loadingTimer = null;
 
 	/** `rescan`: null, or { students, profiles, force } to fetch again before searching. */
-	async function load({ keepStaged = null, rescan = null } = {}) {
+	async function load({ keepStaged = null, rescan = null, silent = false } = {}) {
 		const key = paramsKey(S.applied);
 		if (key === S.loadedKey && !S.error && !rescan) {
 			S.staged = keepStaged || clonePairs(S.applied);
@@ -336,7 +340,7 @@
 		const fullscan = getParam(S.applied, 'fullscan') !== undefined;
 		const started = Date.now();
 		clearInterval(loadingTimer);
-		const showLoading = setTimeout(() => {
+		const showLoading = silent ? null : setTimeout(() => {
 			$('#loading').hidden = false;
 			$('#loading-title').textContent = rescan ? 'Rescanning…' : fullscan ? 'Running full scan…' : 'Loading students…';
 			const bar = $('#loading-progress');
@@ -388,7 +392,7 @@
 			ingest(data);
 			S.loadedKey = key;
 			S.error = null;
-			if (rescan) reportRescan(data.meta.rescanned);
+			if (rescan && !silent) reportRescan(data.meta.rescanned);
 		} catch (e) {
 			if (e.name === 'AbortError') return;
 			console.error(e);
@@ -510,6 +514,14 @@
 	function avatar(u, size = '') {
 		const src = proxied(u.image?.versions?.small || u.image?.link);
 		return `<span class="avatar ${size}">${initials(u)}${src ? `<img src="${esc(src)}" alt="" loading="lazy" onerror="this.remove()">` : ''}</span>`;
+	}
+
+	function entryThumb(u) {
+		const src = photoUrl(u);
+		if (!src) return `<span class="ethumb noimg">${initials(u)}</span>`;
+		return `<span class="ethumb" ${zoomAttrs(u)}>${initials(u)}` +
+			`<img src="${esc(src)}" alt="${esc(u.login)}" loading="lazy" onerror="this.closest('.ethumb').classList.add('noimg');this.remove()">` +
+			`<span class="ethumb-zoom"><i class="fa fa-search-plus"></i></span></span>`;
 	}
 
 	/** A value that can be added to the filters (Ctrl+click, Alt+click or the funnel icon). */
@@ -940,6 +952,79 @@
 		if (parts.length) toast(`Rescan done: ${parts.join(', ')}`, null, 6000);
 	}
 
+	const entrySig = (r) => `${r.u.id}|${r.name}|${r.occ}`;
+	const entryVal = (r) => `${r.mark}|${r.ok}|${r.status}`;
+
+	function snapshotSigs() {
+		const m = new Map();
+		for (const r of S.entries[S.view] || []) m.set(entrySig(r), entryVal(r));
+		return m;
+	}
+
+	function diffSigs(before) {
+		const changed = new Set();
+		for (const r of S.entries[S.view] || []) {
+			const sig = entrySig(r);
+			if (!before.has(sig) || before.get(sig) !== entryVal(r)) changed.add(sig);
+		}
+		return changed;
+	}
+
+	const monitorActive = () => (S.view === 'exams' || S.view === 'projects') && !!S.meta?.fullscan;
+
+	async function monitorTick() {
+		const mon = S.monitor;
+		if (!mon.on || mon.ticking || !monitorActive() || document.hidden) return;
+		mon.ticking = true;
+		renderMonitorBar();
+		const before = snapshotSigs();
+		try {
+			await load({ rescan: { students: false, profiles: true, force: false }, silent: true });
+			mon.changed = diffSigs(before);
+			mon.lastTick = Date.now();
+			mon.lastError = null;
+			renderView();
+			if (mon.changed.size) toast(`${plural(mon.changed.size, 'change')} since last check`, null, 4000);
+		} catch (e) {
+			mon.lastError = e.message || String(e);
+		} finally {
+			mon.ticking = false;
+			renderMonitorBar();
+		}
+	}
+
+	function monitorReschedule() {
+		const mon = S.monitor;
+		clearInterval(mon.timer);
+		mon.timer = mon.on ? setInterval(monitorTick, mon.interval * 1000) : null;
+	}
+
+	function setMonitorOn(on) {
+		const mon = S.monitor;
+		mon.on = on;
+		mon.lastError = null;
+		if (!on) mon.changed = new Set();
+		monitorReschedule();
+		renderMonitorBar();
+		if (on) monitorTick();
+	}
+
+	function setMonitorInterval(seconds) {
+		S.monitor.interval = seconds;
+		store.set('monitorInterval', seconds);
+		monitorReschedule();
+		renderMonitorBar();
+	}
+
+	document.addEventListener('visibilitychange', () => {
+		if (!document.hidden && S.monitor.on && monitorActive()) monitorTick();
+	});
+
+	function renderMonitorBar() {
+		const el = $('#monitor-bar');
+		if (el) el.outerHTML = monitorBarHtml(S.view);
+	}
+
 	function renderStudents() {
 		const m = S.meta;
 		const list = visibleStudents();
@@ -1175,6 +1260,38 @@
 		date: (r) => r.date,
 	};
 
+	function monitorBarHtml(kind) {
+		const mon = S.monitor;
+		const ex = S.explorer[kind];
+		const { rows } = explorerData(kind);
+		const counts = ACTIVE_STATUSES.map((s) => [s, rows.filter((r) => r.status === s).length]).filter(([, n]) => n > 0);
+		const state = mon.ticking ? '<i class="fa fa-refresh fa-spin"></i> checking…'
+			: mon.lastError ? `<i class="fa fa-exclamation-triangle"></i> ${esc(mon.lastError)}`
+			: mon.on ? (mon.lastTick ? `updated ${esc(fmtRel(new Date(mon.lastTick)))}` : 'waiting…')
+			: 'off';
+		return `
+			<div class="monitor" id="monitor-bar">
+				<div class="mon-live">
+					<label class="switch" title="Auto-refresh re-fetches these profiles from the 42 API on a timer — uses API quota, so it stays off until you turn it on">
+						<input type="checkbox" data-bind="mon-live" ${mon.on ? 'checked' : ''}><span class="track"></span><span>Live</span>
+					</label>
+					<label class="mon-every">every
+						<select class="select select-sm" data-bind="mon-interval" title="Auto-refresh interval">
+							${MONITOR_INTERVALS.map((s) => `<option value="${s}" ${mon.interval === s ? 'selected' : ''}>${fmtInterval(s)}</option>`).join('')}
+						</select>
+					</label>
+					<span class="mon-state ${mon.lastError ? 'err' : ''}">${state}</span>
+					${mon.changed.size ? `<span class="mon-changed" title="Attempts whose mark or status changed on the last refresh">${plural(mon.changed.size, 'change')}</span>` : ''}
+				</div>
+				<div class="mon-active">
+					<span class="mon-label">Active now</span>
+					${counts.length
+						? counts.map(([s, n]) => `<button class="mon-chip ${ex.status === s ? 'on' : ''}" data-act="mon-status" data-status="${esc(s)}" title="Filter to ${esc(humanize(s))}">${esc(humanize(s))}<b>${fmtNum(n)}</b></button>`).join('')
+						: '<span class="muted">nobody mid-exam or awaiting correction</span>'}
+				</div>
+			</div>`;
+	}
+
 	function renderExplorer(kind) {
 		const K = KIND[kind];
 		const ex = S.explorer[kind];
@@ -1204,6 +1321,16 @@
 		const studentsN = new Set(rows.map((r) => r.u.id)).size;
 		const passRate = graded.length ? graded.filter((r) => r.ok).length / graded.length * 100 : null;
 		const avg = marks.length ? marks.reduce((a, b) => a + b, 0) / marks.length : null;
+		const sortedMarks = [...marks].sort((a, b) => a - b);
+		const median = sortedMarks.length
+			? (sortedMarks.length % 2 ? sortedMarks[(sortedMarks.length - 1) / 2]
+				: (sortedMarks[sortedMarks.length / 2 - 1] + sortedMarks[sortedMarks.length / 2]) / 2)
+			: null;
+		const now = Date.now();
+		const since = (ms) => rows.filter((r) => { const t = Date.parse(r.date); return t && now - t <= ms; }).length;
+		const last24 = since(864e5);
+		const last7d = since(7 * 864e5);
+		const activeN = rows.filter((r) => ACTIVE_STATUSES.includes(r.status)).length;
 
 		const facetsHtml = `
 			<aside class="facets">
@@ -1245,6 +1372,7 @@
 				<span style="flex:1"></span>
 				<div class="segmented" role="group" aria-label="Layout">
 					<button class="${ex.mode === 'list' ? 'active' : ''}" data-act="ex-mode" data-mode="list"><i class="fa fa-list"></i>Attempts</button>
+					<button class="${ex.mode === 'feed' ? 'active' : ''}" data-act="ex-mode" data-mode="feed"><i class="fa fa-clock-o"></i>Feed</button>
 					<button class="${ex.mode === 'matrix' ? 'active' : ''}" data-act="ex-mode" data-mode="matrix"><i class="fa fa-th"></i>Matrix</button>
 				</div>
 			</div>`;
@@ -1255,6 +1383,10 @@
 				<div class="kpi"><div class="k">Students</div><div class="v">${fmtNum(studentsN)}<small>of ${fmtNum(visibleStudents().length)}</small></div></div>
 				<div class="kpi"><div class="k">Pass rate</div><div class="v">${passRate === null ? '—' : fmtNum(passRate, 1) + '%'}<small>${graded.length ? fmtNum(graded.length) + ' graded' : ''}</small></div></div>
 				<div class="kpi"><div class="k">Average mark</div><div class="v">${avg === null ? '—' : fmtNum(avg, 1)}</div></div>
+				<div class="kpi"><div class="k">Median mark</div><div class="v">${median === null ? '—' : fmtNum(median, 1)}</div></div>
+				<div class="kpi"><div class="k">Active now</div><div class="v">${fmtNum(activeN)}<small>in progress</small></div></div>
+				<div class="kpi"><div class="k">Last 24h</div><div class="v">${fmtNum(last24)}<small>attempts</small></div></div>
+				<div class="kpi"><div class="k">Last 7d</div><div class="v">${fmtNum(last7d)}<small>attempts</small></div></div>
 			</div>`;
 
 		const title = ex.sel.size === 1 ? esc([...ex.sel][0]) : ex.sel.size ? `${ex.sel.size} ${K.labels.toLowerCase()} selected` : `All ${K.labels.toLowerCase()}`;
@@ -1262,8 +1394,9 @@
 			<section>
 				<div class="toolbar"><div class="toolbar-title"><h1>${title}</h1><span class="sub">${plural(base.length, 'attempt')} across ${plural(new Set(base.map((r) => r.u.id)).size, 'student')}</span></div>${rescanButton()}</div>
 				${controls}
+				${monitorBarHtml(kind)}
 				${kpis}
-				${ex.mode === 'matrix' ? renderMatrix(kind, rows, facets) : renderAttempts(kind, rows)}
+				${ex.mode === 'matrix' ? renderMatrix(kind, rows, facets) : ex.mode === 'feed' ? renderFeed(kind, rows) : renderAttempts(kind, rows)}
 			</section>`;
 		return `<div class="explorer">${facetsHtml}${main}</div>`;
 	}
@@ -1285,8 +1418,8 @@
 					</tr></thead>
 					<tbody>
 						${slice.map((r) => `
-							<tr class="clickable" data-act="open" data-id="${r.u.id}" data-tab="${kind}">
-								<td class="student-cell"><div class="who">${avatar(r.u, 'avatar-sm')}<span class="login">${fv('login', r.u.login)}</span></div></td>
+							<tr class="clickable ${S.monitor.changed.has(entrySig(r)) ? 'flash' : ''}" data-act="open" data-id="${r.u.id}" data-tab="${kind}">
+								<td class="student-cell"><div class="who">${entryThumb(r.u)}<span class="login">${fv('login', r.u.login)}</span></div></td>
 								<td>${fvEntry(kind, r.name)}</td>
 								<td>${markBar(r.mark, r.ok)}</td>
 								<td>${resultBadge(r.ok)}</td>
@@ -1299,6 +1432,31 @@
 				</table>
 			</div>
 			${pager(kind, sorted.length, ex.page, size, [50, 100, 250, 500])}`;
+	}
+
+	function renderFeed(kind, rows) {
+		const ex = S.explorer[kind];
+		const dated = rows.filter((r) => r.date).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+		if (!dated.length) return `<div class="empty"><i class="fa fa-clock-o"></i><h3>No dated activity</h3><p>Attempts need a graded or updated date to show here.</p></div>`;
+		const size = S.pageSize[kind];
+		ex.page = clampPage(ex.page, dated.length, size);
+		const slice = dated.slice((ex.page - 1) * size, ex.page * size);
+		let items = '', lastDay = '';
+		for (const r of slice) {
+			const day = fmtDate(r.date);
+			if (day !== lastDay) { items += `<div class="feed-day">${esc(day)}</div>`; lastDay = day; }
+			const flash = S.monitor.changed.has(entrySig(r)) ? 'flash' : '';
+			items += `
+				<div class="feed-item clickable ${flash}" data-act="open" data-id="${r.u.id}" data-tab="${kind}">
+					${entryThumb(r.u)}
+					<div class="feed-main">
+						<div class="feed-line"><span class="login">${fv('login', r.u.login)}</span>${fvEntry(kind, r.name)}</div>
+						<div class="feed-sub">${statusBadge(r.status)}${resultBadge(r.ok)}<span class="muted" title="${esc(fmtDateTime(r.date))}">${esc(fmtRel(r.date))}</span>${r.occ === null ? '' : `<span class="muted">· attempt #${r.occ + 1}</span>`}</div>
+					</div>
+					<div class="feed-mark">${markBar(r.mark, r.ok)}</div>
+				</div>`;
+		}
+		return `<div class="feed">${items}</div>${pager(kind, dated.length, ex.page, size, [50, 100, 250, 500])}`;
 	}
 
 	function renderMatrix(kind, rows, facets) {
@@ -3159,6 +3317,13 @@
 				break;
 			}
 			case 'ex-reset': Object.assign(S.explorer[S.view], { status: '', result: '', min: '', max: '', best: false, page: 1 }); renderView(); break;
+			case 'mon-status': {
+				const ex = S.explorer[S.view];
+				ex.status = ex.status === d.status ? '' : d.status;
+				ex.page = 1;
+				renderView();
+				break;
+			}
 			case 'row-add': S.fieldRows.push({ k: '', op: '==', val: '' }); $('#field-rows').innerHTML = renderFieldRows(); $(`[data-bind="row-k"][data-i="${S.fieldRows.length - 1}"]`)?.focus(); break;
 			case 'row-remove': S.fieldRows.splice(Number(d.i), 1); if (!S.fieldRows.length) S.fieldRows.push({ k: '', op: '==', val: '' }); $('#field-rows').innerHTML = renderFieldRows(); syncFieldRows(); break;
 			case 'panel-reset': {
@@ -3329,6 +3494,8 @@
 			case 'ex-min': ex.min = value; ex.page = 1; rerenderView(); break;
 			case 'ex-max': ex.max = value; ex.page = 1; rerenderView(); break;
 			case 'ex-best': ex.best = value; ex.page = 1; renderView(); break;
+			case 'mon-live': setMonitorOn(value); break;
+			case 'mon-interval': setMonitorInterval(Number(value)); break;
 			case 'dr-q': S.drawer.q = value; rerenderDrawer(); break;
 			case 'dr-status': S.drawer.status = value; renderDrawer(); break;
 			case 'dr-matching': S.drawer.onlyMatching = value; renderDrawer(); break;
