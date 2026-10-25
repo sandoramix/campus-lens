@@ -4,7 +4,7 @@
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>42stalk</title>
+	<title>campus-lens</title>
 	<link rel="shortcut icon" href="{{ url_for('static', filename='42.jpg') }}">
 	<link rel="preconnect" href="https://fonts.googleapis.com">
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -13,7 +13,7 @@
 	<link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 	<script>
 		try {
-			const theme = localStorage.getItem('stalk.theme');
+			const theme = localStorage.getItem('campus-lens.theme');
 			if (theme) document.documentElement.dataset.theme = theme;
 		} catch (e) { }
 	</script>
@@ -24,7 +24,7 @@
 		<div class="appbar-row">
 			<a class="brand" href="{{ url_for('Homepage') }}" title="Reset everything">
 				<img src="{{ url_for('static', filename='42.jpg') }}" alt="">
-				<span>42<b>stalk</b></span>
+				<span>campus<b>lens</b></span>
 			</a>
 
 			<div class="campus-picker">

@@ -1,4 +1,4 @@
-# 42 Stalk
+# Campus Lens
 
 This is a simple Flask app that fetches students from the 42 API and displays them in a web interface.
 The good part is that there is a filtering system that allows you to filter by exams, projects, by average final mark, and every other field that is available in the student's JSON object.
@@ -12,7 +12,7 @@ The good part is that there is a filtering system that allows you to filter by e
    - Students are saved to `data/campus_<CAMPUS_ID>_students.json`
    - The campus becomes the default one in `config.json`
 5. Run the app by running `./run-server.sh` and open http://localhost:8080
-6. Enjoy the stalk!
+6. Enjoy the lens!
 
 ### Which students file is used?
 

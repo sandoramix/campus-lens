@@ -15,9 +15,9 @@ import requests
 
 from api import API
 
-log = logging.getLogger("42stalk.web")
+log = logging.getLogger("campus-lens.web")
 
-if os.environ.get("STALK_IMG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
+if os.environ.get("CAMPUS_LENS_IMG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
 	log.setLevel(logging.WARNING)
 
 	class _HideImgAccessLog(logging.Filter):
@@ -29,7 +29,7 @@ if os.environ.get("STALK_IMG_LOG", "").strip().lower() not in ("1", "true", "yes
 SERVER_PORT = 8080
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.environ.get("STALK_DATA_DIR", os.path.join(ROOT_DIR, "data"))
+DATA_DIR = os.environ.get("CAMPUS_LENS_DATA_DIR", os.path.join(ROOT_DIR, "data"))
 CONFIG_PATH = os.path.join(ROOT_DIR, "config.json")
 if (not os.path.exists(DATA_DIR)):
 	os.mkdir(DATA_DIR)
@@ -1101,7 +1101,7 @@ def Homepage():
 IMG_CACHE_DIR = os.path.join(DATA_DIR, "img_cache")
 IMG_MAX_BYTES = 10 * 1024 * 1024
 IMG_TIMEOUT = (5, 15)
-IMG_CACHE_MAX_BYTES = int(os.environ.get("STALK_IMG_CACHE_MB", "1024")) * 1024 * 1024
+IMG_CACHE_MAX_BYTES = int(os.environ.get("CAMPUS_LENS_IMG_CACHE_MB", "1024")) * 1024 * 1024
 IMG_RESP_HEADERS = {
 	"Cache-Control": "public, max-age=86400",
 	"X-Content-Type-Options": "nosniff",
@@ -1111,7 +1111,7 @@ def _parse_img_hosts(raw):
 	hosts = {h.strip().lower() for h in raw.split(",") if h.strip()}
 	return hosts or {".42.fr"}
 
-IMG_ALLOWED_HOSTS = _parse_img_hosts(os.environ.get("STALK_IMG_HOSTS", ".42.fr"))
+IMG_ALLOWED_HOSTS = _parse_img_hosts(os.environ.get("CAMPUS_LENS_IMG_HOSTS", ".42.fr"))
 
 def img_is_allowed(url):
 	try:
