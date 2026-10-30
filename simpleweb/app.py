@@ -2,12 +2,14 @@ import json
 import logging
 import os
 import glob
+import gzip
 import hashlib
 import mimetypes
 import threading
 from urllib.parse import urlsplit
 from flask import Flask, Response, jsonify, render_template, request, send_from_directory
 import time
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import numbers
 import re
@@ -46,9 +48,12 @@ DERIVED_FIELDS = [
 	{"name": "average_project_final_mark", "type": "number", "description": "Average final mark of the matching projects."},
 	{"name": "average_mark", "type": "number", "description": "Average final mark of every exam and project."},
 	{"name": "cpiscine_final_mark", "type": "number", "description": f"Final mark of the '{CPISCINE_FINAL_EXAM_NAME}'."},
-	{"name": "stage", "type": "string", "description": "'pisciner' (C Piscine is their only cursus), 'cadet' (enrolled in 42cursus) or 'other'."},
+	{"name": "stage", "type": "string", "description": "'upcoming' (subscribed to a 42cursus that has not started yet), 'pisciner' (C Piscine is their only cursus), 'cadet' (enrolled in 42cursus) or 'other'."},
+	{"name": "cursus_start", "type": "string", "description": "Start date of the 42cursus, only for students whose common core has not started yet."},
 	{"name": "cursus", "type": "array", "description": "Slugs of every cursus the student is enrolled in."},
 	{"name": "level", "type": "number", "description": "Level in the main cursus (42cursus if present, otherwise the highest)."},
+	{"name": "cursus_status", "type": "string", "description": "In the 42cursus: 'upcoming', 'active', 'blackholed' (cursus ended at the blackhole), 'left' (ended otherwise) or 'graduated'."},
+	{"name": "cursus_end", "type": "string", "description": "Day the 42cursus ended, for blackholed or left students."},
 	{"name": "exams_passed", "type": "number", "description": "Number of validated exams."},
 	{"name": "projects_passed", "type": "number", "description": "Number of validated projects."},
 ]
@@ -296,12 +301,19 @@ def getStudData(user, idx = -1):
 #-------------------------------------------------------------------------------
 # CACHING FUNCTIONS
 
+_user_cache_memo = (None, {})
+
 def load_user_cache():
+	"""The user cache, parsed again only when its file changes. Callers must not modify the entries."""
+	global _user_cache_memo
 	if not os.path.exists(USER_CACHE_PATH):
 		return {}
 	try:
-		with open(USER_CACHE_PATH, 'r') as f:
-			return json.load(f)
+		mtime = os.path.getmtime(USER_CACHE_PATH)
+		if _user_cache_memo[0] != mtime:
+			with open(USER_CACHE_PATH, 'r') as f:
+				_user_cache_memo = (mtime, json.load(f))
+		return dict(_user_cache_memo[1])
 	except Exception as e:
 		logging.exception(f"Failed to load user cache: {e}")
 		return {}
@@ -562,10 +574,21 @@ def cursus_slugs(user):
 			slugs.append(slug)
 	return slugs
 
-def get_stage(slugs):
-	"""'cadet' if in the main curriculum, 'pisciner' if the C Piscine is the only cursus, else 'other'."""
+def upcoming_cadet_start(user):
+	"""Start date of the main curriculum when every enrollment in it begins in the future (common core not started yet), else None."""
+	now = datetime.now(timezone.utc).isoformat()
+	begins = [c.get('begin_at') or '' for c in user.get('cursus_users') or []
+		if ((c.get('cursus') or {}).get('slug') or CADET_CURSUS.get(c.get('cursus_id'))) in CADET_CURSUS.values()]
+	if begins and all(b > now for b in begins):
+		return min(begins)
+	return None
+
+def get_stage(slugs, upcoming=False):
+	"""'upcoming' if subscribed to a main curriculum not started yet, 'cadet' if in it, 'pisciner' if the C Piscine is the only cursus, else 'other'."""
 	if not slugs:
 		return None
+	if upcoming:
+		return "upcoming"
 	if any(s in CADET_CURSUS.values() for s in slugs):
 		return "cadet"
 	if all(s in CPISCINE_CURSUS.values() for s in slugs):
@@ -623,6 +646,37 @@ def match_entries(entries, criteria):
 		result.append(entry)
 	return result
 
+def parse_iso(value):
+	try:
+		return datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+	except (TypeError, ValueError):
+		return None
+
+CURSUS_PROGRESS_FIELDS = ("cursus_status", "cursus_end")
+
+def cursus_progress(user):
+	"""Status in the main curriculum: 'upcoming', 'active', 'blackholed' (cursus ended at the blackhole date), 'left' or 'graduated'.
+
+	The API's blackhole date outlives the old rules (the intra now uses milestones), so only a cursus that
+	actually ended near that date counts as absorbed. `cursus_end` is the day it ended."""
+	result = dict.fromkeys(CURSUS_PROGRESS_FIELDS)
+	entries = [c for c in user.get('cursus_users') or []
+		if ((c.get('cursus') or {}).get('slug') or CADET_CURSUS.get(c.get('cursus_id'))) in CADET_CURSUS.values()]
+	if not entries:
+		return result
+	mc = max(entries, key=lambda c: c.get('begin_at') or '')
+	now = datetime.now(timezone.utc)
+	begin, end, bh = parse_iso(mc.get('begin_at')), parse_iso(mc.get('end_at')), parse_iso(mc.get('blackholed_at'))
+	if begin is None or begin > now:
+		result['cursus_status'] = 'upcoming'
+	elif end and end <= now:
+		result['cursus_status'] = 'blackholed' if bh and abs((end - bh).days) <= 10 else 'left'
+		result['cursus_end'] = end.date().isoformat()
+	elif user.get('alumni?'):
+		result['cursus_status'] = 'graduated'
+	else:
+		result['cursus_status'] = 'active'
+	return result
 def enrich(user, exam_criteria, project_criteria):
 	all_projects = user.get('all_projects') or []
 	exams = [e for e in all_projects if is_exam(e)]
@@ -637,13 +691,29 @@ def enrich(user, exam_criteria, project_criteria):
 	user['level'] = get_level(user)
 	slugs = cursus_slugs(user)
 	user['cursus'] = slugs or None
-	user['stage'] = get_stage(slugs)
+	user['cursus_start'] = upcoming_cadet_start(user)
+	user['stage'] = get_stage(slugs, user['cursus_start'] is not None)
+	user.update(cursus_progress(user))
 	user['exams_passed'] = sum(1 for e in exams if e.get('validated?')) if all_projects else None
 	user['projects_passed'] = sum(1 for e in projects if e.get('validated?')) if all_projects else None
+
+ENTRY_KEYS = ("id", "final_mark", "status", "validated?", "occurrence", "cursus_ids", "marked_at", "created_at", "updated_at", "current_team_id")
+
+def slim_entry(entry):
+	"""The fields of an exam/project attempt the page uses."""
+	slim = {k: entry[k] for k in ENTRY_KEYS if k in entry}
+	project = entry.get('project') or {}
+	slim['project'] = {k: project.get(k) for k in ('id', 'name', 'slug', 'parent_id')}
+	return slim
 
 def client_payload(user):
 	"""Removes duplicated lists: the client rebuilds them from `all_projects`."""
 	payload = {k: v for k, v in user.items() if k not in ('projects_users', 'exams', 'projects')}
+	if 'all_projects' in payload:
+		payload['all_projects'] = [slim_entry(e) for e in payload['all_projects']]
+	if payload.get('cursus_users'):
+		# each cursus repeats the whole user
+		payload['cursus_users'] = [{k: v for k, v in c.items() if k != 'user'} for c in payload['cursus_users']]
 	payload['matched_exams'] = [e.get('id') for e in user.get('exams', [])]
 	payload['matched_projects'] = [e.get('id') for e in user.get('projects', [])]
 	return payload
@@ -734,21 +804,33 @@ def search(args):
 	exam_criteria = entry_criteria(args, "exam", "examname")
 	project_criteria = entry_criteria(args, "project", "projectname")
 
-	# 2. Fullscan: fetch every remaining student (cached)
-	if meta["fullscan"]:
+	timestamps = cached_user_timestamps()
+	meta["cachedCount"], meta["outdatedCount"] = cache_counts((u.get('id') for u in filtered), timestamps)
+	meta["fetching"] = meta["fullscan"]
+
+	# 2. Profiles: fullscan fetches the missing ones; otherwise the cached ones are shown, whatever their age
+	if meta["fetching"]:
 		mode = fetch_mode(force) if "profiles" in rescan else "missing"
 		filtered = invalidateCache(filteredList=filtered, mode=mode)
 		if "profiles" in rescan:
 			rescanned["profiles"] = {"fetched": SCAN_PROGRESS["total"] - SCAN_PROGRESS["failed"], "failed": SCAN_PROGRESS["failed"], "mode": mode}
+	elif meta["cachedCount"]:
+		cache = load_user_cache()
+		filtered = [dict(cache[str(u['id'])]) if str(u['id']) in cache else u for u in filtered]
 
 	for user in filtered:
 		enrich(user, exam_criteria, project_criteria)
 
+	# the client shows profile data (levels, exams, projects...) as soon as some profiles exist
+	profiled = [u for u in filtered if 'all_projects' in u]
+	meta["fullscan"] = meta["fetching"] or bool(profiled)
+	meta["unfetchedCount"] = len(filtered) - len(profiled)
+
+	# 3. Filters on fetched or computed fields (students without a profile can't match them)
+	needs = {k for k in args if args.get(k) and re.match(r"(exam|project)_", k)}
+	needs |= {k for k in pending if k in DERIVED_FIELD_NAMES}
 	if meta["fullscan"]:
-		# 3. Filters on fetched or computed fields
-		fetched_keys = set(DERIVED_FIELD_NAMES)
-		for user in filtered[:200]:
-			fetched_keys.update(flatten_keys(user).keys())
+		fetched_keys = profile_keys(profiled)[0]
 		for arg, val in list(pending.items()):
 			if arg in fetched_keys:
 				filtered = [stud for stud in filtered if conditional(nested(stud, arg, as_set=True), val)]
@@ -757,10 +839,9 @@ def search(args):
 			filtered = [u for u in filtered if u['exams']]
 		if project_criteria["required"]:
 			filtered = [u for u in filtered if u['projects']]
+		if needs and not meta["fetching"]:
+			meta["unfetchedExcluded"] = meta["unfetchedCount"]
 	else:
-		# Exam/project criteria and computed fields need the fetched profiles
-		needs = {k for k in args if args.get(k) and re.match(r"(exam|project)_", k)}
-		needs |= {k for k in pending if k in DERIVED_FIELD_NAMES}
 		meta["needsFullscan"] = sorted(needs)
 		for k in needs:
 			pending.pop(k, None)
@@ -769,19 +850,65 @@ def search(args):
 	if sortBy:
 		filtered = sort_by(filtered, sortBy, reverse=args.get("order") == "desc")
 
-	timestamps = cached_user_timestamps()
-	meta["cachedCount"], meta["outdatedCount"] = cache_counts((u.get('id') for u in filtered), timestamps)
 	meta["rescanned"] = rescanned or None
 	meta["unknownKeys"] = sorted(pending.keys())
 	meta["count"] = len(filtered)
-	meta["fields"] = students_keys(filtered) if meta["fullscan"] else students_keys(students)
+	meta["fields"] = profile_keys(profiled)[1] if meta["fullscan"] else students_keys(students)
 	return meta, [client_payload(u) for u in filtered]
+
+_profile_keys_memo = {}
+
+def profile_keys(profiled):
+	"""(field names, field descriptions) of the fetched profiles, inferred from a sample once per cache change."""
+	key = (USER_CACHE_PATH, os.path.exists(USER_CACHE_PATH) and os.path.getmtime(USER_CACHE_PATH))
+	if key not in _profile_keys_memo:
+		sample = profiled[:200]
+		names = set(DERIVED_FIELD_NAMES)
+		for user in sample:
+			names.update(flatten_keys(user).keys())
+		_profile_keys_memo.clear()
+		_profile_keys_memo[key] = (names, students_keys(sample))
+	return _profile_keys_memo[key]
+
+LAZY_LOCK = threading.Lock()
+LAZY_BATCH = 12
+
+@app.route("/api/profiles/fetch", methods=["POST"])
+def FetchProfilesAPI():
+	"""Fetches the profiles of a few students the page is showing (never fetched ones only) and returns them."""
+	ids = [str(i) for i in ((request.get_json(silent=True) or {}).get("ids") or []) if str(i).isdigit()][:LAZY_BATCH]
+	if not LAZY_LOCK.acquire(blocking=False):
+		return jsonify({"busy": True, "profiles": {}, "failed": []})
+	try:
+		cache = load_user_cache()
+		fetched, failed = {}, []
+		for i in ids:
+			if i in cache:
+				continue
+			profile = fetch_profile({"id": int(i), "login": i})
+			if profile is None:
+				failed.append(i)
+			else:
+				fetched[i] = profile
+		merge_into_user_cache(fetched)
+		payload = {}
+		for i, profile in fetched.items():
+			enrich(profile, entry_criteria({}, "exam", "examname"), entry_criteria({}, "project", "projectname"))
+			payload[i] = client_payload(profile)
+		return jsonify({"busy": False, "profiles": payload, "failed": failed})
+	finally:
+		LAZY_LOCK.release()
 
 @app.route("/api/search")
 def SearchAPI():
 	meta, students = search(request.args)
-	body = json.dumps({"meta": meta, "students": students}, separators=(",", ":"), default=str)
-	return Response(body, mimetype="application/json")
+	body = json.dumps({"meta": meta, "students": students}, separators=(",", ":"), default=str).encode()
+	response = Response(mimetype="application/json")
+	if "gzip" in request.headers.get("Accept-Encoding", ""):
+		body = gzip.compress(body, 3)
+		response.headers["Content-Encoding"] = "gzip"
+	response.set_data(body)
+	return response
 
 #-------------------------------------------------------------------------------
 # CAMPUSES: catalog, local files and background fetch jobs
