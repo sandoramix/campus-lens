@@ -134,7 +134,7 @@
 	   ========================================================================= */
 
 	const CLIENT_PARAMS = ['view', 'display', 'q', 'sortby', 'order', 'page'];
-	const VIEWS = ['students', 'exams', 'projects'];
+	const VIEWS = ['students', 'cursus', 'graph', 'exams', 'projects'];
 	const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 	const OPS = [['~', 'contains'], ['==', 'is'], ['!=', 'is not'], ['>', '>'], ['>=', '≥'], ['<', '<'], ['<=', '≤']];
 	const OP_SYMBOL = { '~': '∋', '==': '=', '!=': '≠', '>': '>', '>=': '≥', '<': '<', '<=': '≤' };
@@ -167,6 +167,7 @@
 	const FIELD_LABELS = {
 		level: 'Level',
 		stage: 'Stage',
+		cursus_start: 'Cursus start',
 		cursus: 'Cursus',
 		wallet: 'Wallet',
 		correction_point: 'Eval points',
@@ -189,13 +190,17 @@
 	const fieldLabel = (k) => FIELD_LABELS[k] || k;
 
 	const STAGES = {
+		upcoming: { label: 'Common core not started', short: 'Starts soon', cls: 'info', hint: 'Subscribed to a 42cursus that has not started yet' },
 		pisciner: { label: 'C Piscine only', short: 'Pisciner', cls: 'warn', hint: 'The C Piscine is their only cursus' },
 		cadet: { label: 'Cadets', short: 'Cadet', cls: 'accent', hint: 'Enrolled in 42cursus' },
 		other: { label: 'Other', short: 'Other', cls: '', hint: 'Other cursus only (e.g. Discovery Piscine)' },
 	};
 	function stageBadge(u) {
 		const st = STAGES[u.stage];
-		return st ? `<span class="badge ${st.cls}" title="${esc(st.hint)}">${fv('stage', u.stage, esc(st.short))}</span>` : '';
+		const start = u.stage === 'upcoming' && u.cursus_start ? ` ${esc(String(u.cursus_start).slice(0, 10))}` : '';
+		const extra = u.cursus_status === 'blackholed' || u.cursus_status === 'left' ? cursusBadge(u)
+			: '';
+		return st ? `<span class="badge ${st.cls}" title="${esc(st.hint)}">${fv('stage', u.stage, esc(st.short))}${start}</span>${extra}` : '';
 	}
 
 	const SORT_PRESETS = [
@@ -205,7 +210,7 @@
 	const SORT_PRESETS_FULLSCAN = [
 		['level', 'Level'], ['average_exam_final_mark', 'Exam average'], ['average_project_final_mark', 'Project average'],
 		['average_mark', 'Overall average'], ['cpiscine_final_mark', 'C Piscine final exam'], ['exams_passed', 'Exams passed'],
-		['projects_passed', 'Projects passed'],
+		['projects_passed', 'Projects passed'], ['cursus_start', 'Cursus start'],
 	];
 
 	function parseCond(raw) {
@@ -242,7 +247,7 @@
 		q: '',
 		sort: { key: '', dir: 'asc' },
 		page: 1,
-		pageSize: { grid: 48, table: 50, exams: 100, projects: 100, matrix: 100, ...store.get('pageSize', {}) },
+		pageSize: { grid: 48, table: 50, cursus: 50, exams: 100, projects: 100, matrix: 100, ...store.get('pageSize', {}) },
 		explorer: { exams: newExplorer(), projects: newExplorer() },
 
 		drawer: { id: null, tab: 'overview', q: '', status: '', onlyMatching: false, sort: { key: 'date', dir: 'desc' }, nav: [] },
@@ -254,7 +259,16 @@
 		// what the Rescan button fetches again; `force` is never remembered
 		rescan: { students: true, profiles: true, ...store.get('rescan', {}), force: false },
 		noticeDismissed: store.get('dismissed', {}),
+		cursus: { status: 'active', sort: { key: 'date', dir: 'desc' }, page: 1 },
+		graph: { me: store.get('me', ''), sel: null, zoom: 1, minPeople: 3, onlyActive: true, show: {}, sort: 'level' },
 	};
+
+	/** Profiles fetched in the background for the students on screen (the lazy "full scan"). */
+	const LZ = { on: store.get('autoFetch', true), busy: false, failed: new Set(), timer: null, flushTimer: null, left: 0, stash: {} };
+	const LAZY_BATCH = 12;       // profiles per request (the server accepts as many)
+	const LAZY_MAX_VIEW = 400;   // the cursus and graph views fetch everything on screen up to this many students
+	const MAIN_CURSUS = new Set([21, 1]);
+	const hasProfile = (u) => Array.isArray(u.all_projects);
 
 	/* =========================================================================
 	   Params & URL
@@ -358,7 +372,7 @@
 				} else {
 					const left = scan.total - scan.done;
 					setText($('#loading-title'), rescan ? 'Fetching profiles again…' : 'Running full scan…');
-					setText($('#loading-sub'), `Fetched ${fmtNum(scan.done)} of ${plural(scan.total, 'profile')} from the 42 API · ${left ? apiEstimate(left) + ' left' : 'finishing'} · ${elapsed}`);
+					setText($('#loading-sub'), `Fetched ${fmtNum(scan.done)} of ${plural(scan.total, 'profile')} from the 42 API · ${left ? scanEta(scan, left) + ' left' : 'finishing'} · ${elapsed}`);
 				}
 				bar.hidden = false;
 				bar.firstElementChild.style.width = `${scan.total ? scan.done / scan.total * 100 : 0}%`;
@@ -424,6 +438,8 @@
 			u._exams = all.filter(isExamEntry);
 			u._projects = all.filter((e) => !isExamEntry(e));
 			u._matched = new Set([...(u.matched_exams || []), ...(u.matched_projects || [])]);
+			u._now = all.filter((e) => ACTIVE_STATUSES.includes(e.status) && (e.cursus_ids || []).some((c) => MAIN_CURSUS.has(c)));
+			u._begin = (u.cursus_users || []).filter((c) => MAIN_CURSUS.has(c.cursus_id) && c.begin_at).map((c) => Date.parse(c.begin_at)).sort((a, b) => b - a)[0] ?? null;
 			u._search = [u.login, u.displayname, u.usual_full_name, u.email, u.first_name, u.last_name]
 				.filter(Boolean).join(' ').toLowerCase();
 			const month = MONTHS.indexOf(String(u.pool_month || '').toLowerCase());
@@ -641,6 +657,7 @@
 		const ids = S.meta ? visibleIds() : new Set();
 		const counts = {
 			students: S.meta ? visibleStudents().length : '',
+			cursus: S.meta ? cursusRows().length : '',
 			exams: S.meta?.fullscan ? S.entries.exams.filter((r) => ids.has(r.u.id)).length : '',
 			projects: S.meta?.fullscan ? S.entries.projects.filter((r) => ids.has(r.u.id)).length : '',
 		};
@@ -728,6 +745,16 @@
 	}
 
 
+	/** Time left of a running scan, from the pace measured so far (the fixed estimate until a few profiles are done). */
+	function scanEta(scan, left) {
+		const spent = scan.startedAt ? Date.now() / 1000 - scan.startedAt : 0;
+		if (scan.done < 3 || spent < 3) return apiEstimate(left);
+		const seconds = Math.round(left * spent / scan.done);
+		if (seconds < 60) return `about ${Math.max(5, Math.round(seconds / 5) * 5)} s`;
+		const m = Math.floor(seconds / 60);
+		return m < 10 ? `about ${m} min ${String(seconds % 60).padStart(2, '0')} s` : `about ${m + (seconds % 60 >= 30 ? 1 : 0)} min`;
+	}
+
 	function apiEstimate(n) {
 		// The 42 API allows ~2 requests per second
 		const minutes = n / 2 / 60;
@@ -766,24 +793,14 @@
 						<div class="notice-actions"><button class="btn btn-sm" data-act="remove-unknown">Remove</button></div>
 					</div>`);
 			}
-			if (!m.fullscan && S.view === 'students' && m.count > 0 && !S.noticeDismissed.fullscan) {
-				const toFetch = Math.max(0, m.count - (m.cachedCount || 0));
-				const heavy = toFetch > 300;
+			if (m.unfetchedExcluded && !m.fetching) {
 				out.push(`
-					<div class="notice ${heavy ? 'warn' : 'info'}"><i class="fa fa-${heavy ? 'clock-o' : 'info-circle'}"></i>
+					<div class="notice warn"><i class="fa fa-filter"></i>
 						<div class="notice-body">
-							<div class="notice-title">Exams, projects and levels aren't loaded</div>
-							<div class="notice-text">
-								A full scan fetches each student's profile from the 42 API and caches it for ${m.cacheHours}h.
-								${toFetch === 0
-									? `All ${plural(m.count, 'student')} in this result are cached — it's instant.`
-									: `<b>${fmtNum(m.cachedCount || 0)}</b> of ${plural(m.count, 'student')} are cached; <b>${fmtNum(toFetch)}</b> would be fetched (${apiEstimate(toFetch)}).${heavy ? ' Narrow the list down first, e.g. by pool year.' : ''}`}
-							</div>
+							<div class="notice-title">${plural(m.unfetchedExcluded, 'student')} left out</div>
+							<div class="notice-text">Filters on levels, exams and projects only match students whose profile is fetched. The others can't be told apart until they are fetched.</div>
 						</div>
-						<div class="notice-actions">
-							<button class="btn btn-ghost btn-sm" data-act="dismiss" data-notice="fullscan">Dismiss</button>
-							<button class="btn btn-primary btn-sm" data-act="fullscan-on"><i class="fa fa-bolt"></i>Run full scan</button>
-						</div>
+						<div class="notice-actions"><button class="btn btn-primary btn-sm" data-act="fullscan-on"><i class="fa fa-bolt"></i>Run full scan</button></div>
 					</div>`);
 			}
 			const failed = m.fullscan ? S.students.filter((u) => u.failedFetchExams).length : 0;
@@ -807,8 +824,15 @@
 		const m = S.meta;
 		if (!m) { root.innerHTML = S.error ? '' : '<div class="empty"><div class="spinner"></div></div>'; return; }
 		if (m.error) { root.innerHTML = renderSetup(); return; }
+		const scrolled = $('.graph-scroll');
+		const graphPos = scrolled ? [scrolled.scrollLeft, scrolled.scrollTop] : null;
 		if (S.view === 'students') root.innerHTML = renderStudents();
+		else if (S.view === 'cursus') root.innerHTML = renderCursusView();
+		else if (S.view === 'graph') root.innerHTML = renderGraph();
 		else root.innerHTML = renderExplorer(S.view);
+		const graphScroll = graphPos && S.view === 'graph' ? $('.graph-scroll') : null;
+		if (graphScroll) [graphScroll.scrollLeft, graphScroll.scrollTop] = graphPos;
+		scheduleLazy(600);
 	}
 
 	function renderSetup() {
@@ -851,7 +875,7 @@
 		const current = op === '==' || op === '~' ? val : '';
 		return `
 			<div class="segmented" role="group" aria-label="Student type">
-				${[['', 'Everyone'], ['pisciner', 'Pisciners'], ['cadet', 'Cadets'], ['other', 'Other']].map(([k, label]) => `
+				${[['', 'Everyone'], ['pisciner', 'Pisciners'], ['cadet', 'Cadets'], ['upcoming', 'Starts soon'], ['other', 'Other']].map(([k, label]) => `
 					<button class="${current === k ? 'active' : ''}" data-act="stage" data-stage="${k}" title="${esc(STAGES[k]?.hint || 'No restriction')}">${label}</button>`).join('')}
 			</div>`;
 	}
@@ -1129,7 +1153,7 @@
 	function levelStat(u) {
 		if (!isNum(u.level)) return '<span class="muted">—</span>';
 		const pct = Math.round((u.level % 1) * 100);
-		return `${fv('level', u.level, fmtNum(u.level, 2))}<span class="lvl-bar" title="${pct}% to level ${Math.floor(u.level) + 1}"><i style="width:${pct}%"></i></span>`;
+		return `<span class="lvl-cell">${fv('level', u.level, fmtNum(u.level, 2))}<span class="lvl-bar" title="${pct}% to level ${Math.floor(u.level) + 1}"><i style="width:${pct}%"></i></span></span>`;
 	}
 
 	function entryChip(kind, e) {
@@ -1212,6 +1236,473 @@
 	}
 
 	/* ---------- Exams / projects explorer ---------- */
+
+	/* ---------- Lazy profile fetching ---------- */
+
+	let lastInput = 0;
+	for (const type of ['pointerdown', 'keydown', 'wheel', 'scroll', 'input']) {
+		document.addEventListener(type, () => { lastInput = Date.now(); }, { passive: true, capture: true });
+	}
+
+	/** Students whose profile is missing and worth fetching for what is on screen. */
+	function lazyTargets() {
+		if (!S.meta || S.meta.error || S.meta.fetching) return [];
+		const out = [];
+		if (S.drawer.id !== null && S.byId.has(S.drawer.id)) out.push(S.byId.get(S.drawer.id));
+		if (S.view === 'students') {
+			const size = S.pageSize[S.display];
+			out.push(...visibleStudents().slice((S.page - 1) * size, S.page * size));
+		} else if (S.view === 'cursus' || S.view === 'graph') {
+			const all = visibleStudents();
+			if (all.length <= LAZY_MAX_VIEW) out.push(...all);
+		}
+		return [...new Set(out)].filter((u) => !hasProfile(u) && !LZ.failed.has(u.id) && !LZ.stash[u.id]);
+	}
+
+	function renderAutoFetch() {
+		const b = $('#btn-autofetch');
+		if (!b) return;
+		b.classList.toggle('active', LZ.on);
+		const label = !LZ.on ? 'Auto-fetch off' : LZ.busy || LZ.left ? `Fetching ${fmtNum(LZ.left)}…` : 'Auto-fetch';
+		const html = `${LZ.busy ? '<span class="spinner spinner-sm"></span>' : '<i class="fa fa-bolt"></i>'}<span>${label}</span>`;
+		if (b.innerHTML !== html) b.innerHTML = html;
+		b.title = LZ.on
+			? 'Profiles of the students on screen are fetched from the 42 API in the background. Click to pause.'
+			: 'Auto-fetch is paused. Click to fetch the profiles of the students on screen as you browse.';
+	}
+
+	function scheduleLazy(delay = 500) {
+		clearTimeout(LZ.timer);
+		if (!LZ.on || LZ.busy) { renderAutoFetch(); return; }
+		LZ.timer = setTimeout(lazyStep, delay);
+		LZ.left = lazyTargets().length;
+		renderAutoFetch();
+	}
+
+	/** Adds freshly fetched profiles (already enriched by the server) to the students on screen. */
+	function mergeProfiles(profiles) {
+		const n = Object.keys(profiles).length;
+		if (!n) return;
+		S.students = S.students.map((u) => (profiles[u.id] ? { ...u, ...profiles[u.id] } : u));
+		S.meta.fullscan = true;
+		S.meta.cachedCount = (S.meta.cachedCount || 0) + n;
+		S.meta.unfetchedCount = Math.max(0, (S.meta.unfetchedCount || 0) - n);
+		ingest({ meta: S.meta, students: S.students });
+		graphCache = null;
+		renderTabs();
+		renderNotices();
+		keepFocus(renderView);
+		if (S.drawer.id !== null && S.byId.has(S.drawer.id)) renderDrawer();
+	}
+
+	/** Shows the stashed profiles once the user stops interacting, so the page never jumps under their hands. */
+	function flushStash() {
+		clearTimeout(LZ.flushTimer);
+		if (!Object.keys(LZ.stash).length) return;
+		const wait = 1200 - (Date.now() - lastInput);
+		if (wait > 0 || document.hidden) { LZ.flushTimer = setTimeout(flushStash, Math.max(wait, 400)); return; }
+		const profiles = LZ.stash;
+		LZ.stash = {};
+		mergeProfiles(profiles);
+		scheduleLazy(200);
+	}
+
+	async function lazyStep() {
+		if (!LZ.on || LZ.busy || document.hidden) return;
+		const targets = lazyTargets();
+		LZ.left = targets.length;
+		if (!targets.length) { renderAutoFetch(); return; }
+		LZ.busy = true;
+		renderAutoFetch();
+		const loadedKey = S.loadedKey;
+		try {
+			const res = await postJson('/api/profiles/fetch', { ids: targets.slice(0, LAZY_BATCH).map((u) => u.id) });
+			if (S.loadedKey !== loadedKey) return;
+			if (res.busy) { LZ.timer = setTimeout(lazyStep, 3000); return; }
+			for (const id of res.failed) LZ.failed.add(Number(id));
+			Object.assign(LZ.stash, res.profiles);
+		} catch (e) {
+			console.error(e);
+			LZ.on = false;
+			store.set('autoFetch', false);
+			toast(`Auto-fetch paused: ${esc(e.message)}`, null, 6000);
+		} finally {
+			LZ.busy = false;
+			flushStash();
+			scheduleLazy(300);
+		}
+	}
+
+	function setAutoFetch(on) {
+		LZ.on = on;
+		store.set('autoFetch', on);
+		if (on) LZ.failed.clear();
+		scheduleLazy(100);
+	}
+
+	document.addEventListener('visibilitychange', () => { if (!document.hidden) scheduleLazy(300); });
+
+	/** "1,128 / 2,095 profiles": how much of what is listed has its profile, and what can be done about it. */
+	function coverage() {
+		if (!S.meta?.fullscan && !S.meta?.unfetchedCount) return '';
+		const list = visibleStudents();
+		const missing = list.filter((u) => !hasProfile(u)).length;
+		if (!missing) return '';
+		const reach = S.view === 'students' || list.length <= LAZY_MAX_VIEW;
+		const text = `${fmtNum(list.length - missing)} / ${fmtNum(list.length)} profiles`;
+		const hint = !reach ? `<button class="link" data-act="fullscan-on">too many to load while browsing: narrow the list or run a full scan</button>`
+			: LZ.on ? '<span class="muted">loading as you browse</span>' : '<button class="link" data-act="autofetch">resume auto-fetch</button>';
+		return `<span class="coverage"><i class="fa fa-database"></i>${text} · ${hint}</span>`;
+	}
+
+	/* ---------- Cursus tracker ---------- */
+
+	const CURSUS_STATUS = {
+		active: { label: 'Active', cls: 'ok', hint: 'In the 42cursus, not blackholed' },
+		blackholed: { label: 'Blackholed', cls: 'bad', hint: 'The cursus ended at the blackhole' },
+		left: { label: 'Left', cls: '', hint: 'The cursus ended before the blackhole' },
+		upcoming: { label: 'Starts soon', cls: 'info', hint: 'Common core not started yet' },
+	};
+	const CURSUS_TABS = [['active', 'Active'], ['upcoming', 'Starts soon'], ['blackholed', 'Blackholed']];
+	const CURSUS_SORT = {
+		login: (u) => u.login.toLowerCase(), level: (u) => u.level, pool: (u) => u.pool,
+		date: (u) => cursusDate(u),
+	};
+	const cursusRows = () => visibleStudents().filter((u) => ['active', 'upcoming', 'blackholed'].includes(u.cursus_status));
+	/** The date shown for a status: when the cursus starts, started, or ended. */
+	const cursusDate = (u) => (u.cursus_status === 'upcoming' ? u.cursus_start : u.cursus_status === 'active' ? (u._begin ? new Date(u._begin).toISOString() : null) : u.cursus_end);
+
+	function cursusBadge(u) {
+		const st = CURSUS_STATUS[u.cursus_status];
+		return st ? `<span class="badge ${st.cls}" title="${esc(st.hint)}">${esc(st.label)}</span>` : '';
+	}
+
+	function renderCursusView() {
+		const C = S.cursus;
+		const all = cursusRows();
+		const rows = sortBy(all.filter((u) => u.cursus_status === C.status), CURSUS_SORT[C.sort.key] || CURSUS_SORT.date, C.sort.dir);
+		const size = S.pageSize.cursus;
+		C.page = clampPage(C.page, rows.length, size);
+		const slice = rows.slice((C.page - 1) * size, C.page * size);
+		const tabs = CURSUS_TABS.map(([k, label]) => `<button class="${C.status === k ? 'active' : ''}" data-act="co-filter" data-status="${k}">${label} <span class="num muted">${fmtNum(all.filter((u) => u.cursus_status === k).length)}</span></button>`).join('');
+		const sh = (key, label, cls) => sortHeader('cursus', key, label, C.sort, cls);
+		const dateLabel = { active: 'Started', upcoming: 'Starts', blackholed: 'Absorbed' }[C.status];
+		return `
+			<div class="toolbar">
+				<div class="toolbar-title"><h1>Cursus</h1>${coverage()}</div>
+				<div class="segmented" role="group" aria-label="Status">${tabs}</div>
+			</div>
+			${!rows.length ? `<div class="empty"><i class="fa fa-hourglass-o"></i><h3>Nobody here</h3><p>${all.length ? 'Nobody has this status.' : 'Cursus data comes with the profiles: they load as you browse, or with a full scan.'}</p></div>` : `
+			<div class="table-wrap">
+				<table class="data">
+					<thead><tr>
+						${sh('login', 'Student')}<th>Status</th>${sh('date', dateLabel)}${sh('pool', 'Pool')}${sh('level', 'Level')}
+					</tr></thead>
+					<tbody>
+						${slice.map((u) => `
+							<tr class="clickable" data-act="open" data-id="${u.id}">
+								<td class="student-cell"><div class="who">${entryThumb(u)}<span class="names"><span class="login">${esc(u.login)}</span><span class="display">${esc(u.displayname)}</span></span></div></td>
+								<td>${cursusBadge(u)}</td>
+								<td>${dateRel(cursusDate(u))}</td>
+								<td>${poolText(u)}</td>
+								<td>${isNum(u.level) ? fmtNum(u.level, 2) : '—'}</td>
+							</tr>`).join('')}
+					</tbody>
+				</table>
+			</div>
+			${pager('cursus', rows.length, C.page, size, [25, 50, 100, 250])}`}`;
+	}
+	/* ---------- Project graph ---------- */
+
+	const SEARCHING = ['searching_a_group', 'creating_group', 'waiting_to_start'];
+	const GRAPH = { firstR: 140, stepR: 110, margin: 70 };
+	const RANK_EXAM = /^exam rank (\d+)/i;
+	const SERIES = /^(.*\S)\s+(\d{1,2})$/;
+	const projectKey = (p) => String(p.name || p.slug || '').trim().toLowerCase();
+
+	/** The best attempt of a student on each main-cursus project: project key -> { p, e, state, at }. */
+	function projectStates(u) {
+		const mine = new Map();
+		for (const e of u.all_projects || []) {
+			const p = e.project;
+			if (!p?.id || (e.status === 'parent' && !e['validated?'])) continue;
+			if (!(e.cursus_ids || []).some((c) => MAIN_CURSUS.has(c))) continue;
+			const state = e['validated?'] ? 'done' : SEARCHING.includes(e.status) ? 'searching' : ACTIVE_STATUSES.includes(e.status) ? 'working' : 'failed';
+			const rank = { done: 3, working: 2, searching: 2, failed: 1 }[state];
+			const at = Date.parse(e.created_at) || 0;
+			const key = projectKey(p);
+			const prev = mine.get(key);
+			if (!prev || rank > prev.rank || (rank === prev.rank && at > prev.at)) mine.set(key, { p, e, state, rank, at, done: Date.parse(e.marked_at) || at });
+		}
+		return mine;
+	}
+
+	const median = (xs) => {
+		if (!xs.length) return null;
+		const s = [...xs].sort((a, b) => a - b);
+		return s[Math.floor(s.length / 2)];
+	};
+
+	let graphCache = null;
+
+	/**
+	 * The curriculum as the students lived it. The intra's graph isn't exposed by the 42 API, so the layout
+	 * is rebuilt from the data: the rank of a project is how many "Exam Rank" a student had validated when
+	 * starting it, and a link joins a project to the one students most often start next.
+	 */
+	function graphModel() {
+		const list = visibleStudents();
+		const key = S.graph.minPeople;
+		if (graphCache && graphCache.src === list && graphCache.key === key) return graphCache.model;
+		const nodes = new Map();
+		const trails = [];
+		let profiled = 0;
+		for (const u of list) {
+			if (!hasProfile(u)) continue;
+			const mine = projectStates(u);
+			if (!mine.size) continue;
+			profiled++;
+			const examDone = [...mine.entries()].filter(([k, x]) => RANK_EXAM.test(k) && x.state === 'done').map(([k, x]) => [Number(k.match(RANK_EXAM)[1]), x.done]);
+			for (const [k, x] of mine) {
+				let n = nodes.get(k);
+				if (!n) nodes.set(k, n = { id: k, name: x.p.name || x.p.slug, exam: RANK_EXAM.test(k), people: [], ranks: [], offsets: [], done: 0, working: 0, searching: 0, failed: 0 });
+				n.people.push({ u, e: x.e, state: x.state });
+				n[x.state]++;
+				const before = new Set(examDone.filter(([num, at]) => at < x.at && num !== Number((k.match(RANK_EXAM) || [])[1])).map(([num]) => num));
+				n.ranks.push(before.size);
+				if (u._begin && x.at) n.offsets.push((x.at - u._begin) / 86400000);
+			}
+			trails.push([...mine.entries()].sort((a, b) => a[1].at - b[1].at).map(([k]) => k));
+		}
+		const kept = [...nodes.values()].filter((n) => n.people.length >= key);
+		for (const n of kept) { n.med = median(n.offsets); n.rank = n.exam ? Math.max(0, Number(n.id.match(RANK_EXAM)[1]) - 2) : median(n.ranks) ?? 0; }
+		const byKey = new Map(kept.map((n) => [n.id, n]));
+
+		// numbered series of the same rank ("Python Module 00..10") become one cluster
+		const series = new Map();
+		for (const n of kept) {
+			const m = !n.exam && n.name.match(SERIES);
+			if (!m) continue;
+			const gk = `${n.rank}|${m[1].toLowerCase()}`;
+			if (!series.has(gk)) series.set(gk, { label: m[1], rank: n.rank, members: [] });
+			series.get(gk).members.push(n);
+		}
+		const grouped = new Map();
+		const items = [];
+		for (const g of series.values()) {
+			if (g.members.length < 3) continue;
+			g.members.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+			const cluster = { id: 'g:' + g.label.toLowerCase(), group: true, name: g.label, members: g.members, rank: g.rank, med: median(g.members.map((n) => n.med).filter(isNum)), exam: false };
+			items.push(cluster);
+			for (const n of g.members) grouped.set(n.id, cluster);
+		}
+		for (const n of kept) if (!grouped.has(n.id)) items.push(n);
+
+		// concentric rings, like the intra's graph: the centre is the project everybody starts with, then one ring per rank
+		const centre = items.filter((n) => n.rank === 0 && !n.group).sort((a, b) => b.people.length - a.people.length)[0];
+		const rings = new Map();
+		for (const n of items) {
+			n.ring = n === centre ? 0 : n.rank + 1;
+			if (!rings.has(n.ring)) rings.set(n.ring, []);
+			rings.get(n.ring).push(n);
+		}
+		const ringR = (i) => (i === 0 ? 0 : GRAPH.firstR + (i - 1) * GRAPH.stepR);
+		const maxRing = Math.max(0, ...rings.keys());
+		const extent = ringR(maxRing) + GRAPH.margin;
+		for (const [i, list] of rings) {
+			list.sort((a, b) => (a.exam - b.exam) || ((a.med ?? 1e9) - (b.med ?? 1e9)) || a.name.localeCompare(b.name));
+			list.forEach((n, j) => {
+				const angle = -Math.PI / 2 + i * 0.55 + (j / list.length) * Math.PI * 2;
+				n.cx = extent + ringR(i) * Math.cos(angle);
+				n.cy = extent + ringR(i) * Math.sin(angle);
+				if (n.group) {
+					const k = n.members.length;
+					const r = k > 1 ? 16 + k * 3 : 0;
+					n.members.forEach((m, mi) => {
+						const a = (mi / k) * Math.PI * 2 - Math.PI / 2;
+						m.cx = n.cx + r * Math.cos(a);
+						m.cy = n.cy + r * Math.sin(a);
+						m.parent = n;
+						m.ring = n.ring;
+					});
+					n.r = r + 12;
+				}
+			});
+		}
+		const at = (id) => grouped.get(id) || byKey.get(id);
+
+		const pair = new Map();
+		for (const t of trails) {
+			const seq = t.filter((id) => byKey.has(id)).map((id) => at(id).id).filter((id, i, a) => id !== a[i - 1]);
+			for (let i = 0; i < seq.length - 1; i++) {
+				const k = seq[i] + '\u0000' + seq[i + 1];
+				pair.set(k, (pair.get(k) || 0) + 1);
+			}
+		}
+		const idx = new Map(items.map((n) => [n.id, n]));
+		const outgoing = new Map();
+		for (const [k, count] of pair) {
+			const [a, b] = k.split('\u0000').map((id) => idx.get(id));
+			if (!a || !b || b.ring <= a.ring || count < 3 || count < 0.3 * Math.min(a.people?.length ?? count * 4, b.people?.length ?? count * 4)) continue;
+			if (!outgoing.has(a.id)) outgoing.set(a.id, []);
+			outgoing.get(a.id).push({ a, b, count });
+		}
+		const edges = [...outgoing.values()].flatMap((l) => l.sort((x, y) => y.count - x.count).slice(0, 2));
+		const model = {
+			nodes: kept, items, byKey, edges, profiled, extent,
+			rings: [...rings.keys()].filter((i) => i > 0).sort((a, b) => a - b).map((i) => ({ ring: i, r: ringR(i) })),
+			size: extent * 2,
+		};
+		graphCache = { src: list, key, model };
+		return model;
+	}
+
+	const graphMe = () => {
+		const q = S.graph.me.trim().toLowerCase();
+		return q ? S.students.find((u) => u.login.toLowerCase() === q) || null : null;
+	};
+
+	/** Level distance to the viewer, to put the people of similar progress first. */
+	const levelGap = (u, me) => (me && isNum(u.level) && isNum(me.level) ? u.level - me.level : null);
+
+	function personRow(p, me, node) {
+		const u = p.u;
+		const gap = levelGap(u, me);
+		const others = [...new Set(u._now.map((e) => e.project?.name).filter((n) => n && n !== node.name))];
+		return `
+			<button class="gperson" data-act="open" data-id="${u.id}">
+				${avatar(u)}
+				<span class="who"><b>${esc(u.login)}</b><small>${others.length ? 'also on ' + esc(others.slice(0, 2).join(', ')) : esc(u.displayname || '')}</small></span>
+				<span class="meta">
+					${isNum(u.level) ? `<span class="num" title="Level">${fmtNum(u.level, 2)}</span>` : ''}
+					${gap !== null ? `<span class="gap ${Math.abs(gap) <= 1 ? 'near' : ''}" title="Level difference with you">${gap > 0 ? '+' : ''}${fmtNum(gap, 1)}</span>` : ''}
+				</span>
+			</button>`;
+	}
+
+	function renderGraphPanel(model, me, mine) {
+		const G = S.graph;
+		const sel = G.sel && (model.byKey.get(G.sel) || model.items.find((n) => n.id === G.sel));
+		const node = sel && !sel.group ? sel : null;
+		if (sel?.group) {
+			return `
+				<div class="gpanel-head"><h3>${esc(sel.name)}</h3><button class="btn btn-ghost btn-xs icon-btn" data-act="graph-node" data-pid="" title="Close"><i class="fa fa-times"></i></button></div>
+				<p class="field-hint">${fmtNum(sel.members.length)} projects, one rank. Pick one:</p>
+				<div class="gmembers">${sel.members.map((m) => `
+					<button class="gmember ${mine.get(m.id) ? 'me-' + mine.get(m.id).state : ''}" data-act="graph-node" data-pid="${esc(m.id)}">
+						<span>${esc(m.name)}</span><small>${fmtNum(m.done)} done · ${fmtNum(m.working + m.searching)} on it</small></button>`).join('')}</div>`;
+		}
+		if (!node) {
+			return `<div class="gpanel-empty"><i class="fa fa-hand-pointer-o"></i><p>Pick a project to see who is on it, who needs a team and who already validated it.</p>
+				<p class="field-hint">${me ? '' : 'Enter your login above to see where you stand and sort people by how close their level is to yours.'}</p></div>`;
+		}
+		const people = node.people.filter((p) => !G.onlyActive || p.u.cursus_status === 'active');
+		const order = (list) => sortBy(list, (p) => (me && isNum(p.u.level) && isNum(me.level) ? Math.abs(p.u.level - me.level) : -(p.u.level ?? -1)), 'asc');
+		const section = (state, title, icon, empty) => {
+			const list = order(people.filter((p) => p.state === state));
+			const open = G.show[state];
+			return `
+				<section class="gsection">
+					<h4><i class="fa fa-${icon}"></i>${title} <span class="muted">${fmtNum(list.length)}</span></h4>
+					${list.length ? list.slice(0, open ? 400 : 6).map((p) => personRow(p, me, node)).join('') : `<p class="field-hint">${empty}</p>`}
+					${list.length > 6 ? `<button class="btn btn-ghost btn-xs" data-act="graph-more" data-state="${state}">${open ? 'Show less' : `Show all ${fmtNum(list.length)}`}</button>` : ''}
+				</section>`;
+		};
+		const parent = node.parent;
+		return `
+			<div class="gpanel-head">
+				<div><h3>${esc(node.name)}</h3>${parent ? `<button class="link" data-act="graph-node" data-pid="${esc(parent.id)}">‹ ${esc(parent.name)}</button>` : ''}</div>
+				<button class="btn btn-ghost btn-xs icon-btn" data-act="graph-node" data-pid="" title="Close"><i class="fa fa-times"></i></button>
+			</div>
+			<div class="gstats-line">
+				<span class="badge ok"><i class="fa fa-check"></i>${fmtNum(node.done)} validated</span>
+				<span class="badge info"><i class="fa fa-circle"></i>${fmtNum(node.working)} working</span>
+				<span class="badge warn"><i class="fa fa-users"></i>${fmtNum(node.searching)} need a team</span>
+			</div>
+			${section('searching', 'Looking for a team', 'users', 'Nobody is looking for a group right now.')}
+			${section('working', 'Working on it', 'circle', 'Nobody is on it right now.')}
+			${section('done', 'Validated, can help', 'check', 'Nobody validated it yet.')}`;
+	}
+
+	/** Teal: you validated it. White ring: you are on it. Otherwise the fill shows how many students validated it. */
+	function nodeClass(n, mine, sel) {
+		const m = mine.get(n.id);
+		return ['gnode', m ? `me-${m.state}` : '', n.exam ? 'exam' : '', sel === n.id ? 'sel' : ''].filter(Boolean).join(' ');
+	}
+
+	function renderGraph() {
+		const G = S.graph;
+		const model = graphModel();
+		const me = graphMe();
+		const mine = me ? projectStates(me) : new Map();
+		const myDone = [...mine.values()].filter((x) => x.state === 'done').length;
+		const logins = S.students.filter((u) => u.cursus_status).map((u) => `<option value="${esc(u.login)}"></option>`).join('');
+		const toolbar = `
+			<div class="toolbar">
+				<div class="toolbar-title"><h1>Project graph</h1>${coverage()}</div>
+				<label class="toolbar-group"><span class="label">You</span>
+					<input class="input input-sm" list="graph-logins" data-bind="graph-me" value="${esc(G.me)}" placeholder="your login" autocomplete="off" spellcheck="false" style="width:140px">
+					<datalist id="graph-logins">${logins}</datalist>
+				</label>
+				${G.me && !me ? '<span class="warn-text" style="font-size:12px">not in this list</span>' : me ? `<span class="muted" style="font-size:12px">${fmtNum(myDone)} validated${isNum(me.level) ? ' · level ' + fmtNum(me.level, 2) : ''}</span>` : ''}
+				<label class="toolbar-group check"><input type="checkbox" data-bind="graph-active" ${G.onlyActive ? 'checked' : ''}><span>Active students only</span></label>
+				<div class="segmented" role="group" aria-label="Zoom">
+					<button data-act="graph-zoom" data-delta="-0.15" title="Zoom out"><i class="fa fa-minus"></i></button>
+					<button data-act="graph-zoom" data-delta="0" title="Fit">Fit</button>
+					<button data-act="graph-zoom" data-delta="0.15" title="Zoom in"><i class="fa fa-plus"></i></button>
+				</div>
+			</div>`;
+		if (!model.nodes.length) {
+			return `${toolbar}<div class="empty"><i class="fa fa-sitemap"></i><h3>No project data yet</h3>
+				<p>The graph is built from the students' projects. They load as you browse, or with a full scan.</p></div>`;
+		}
+		const focus = G.sel ? new Set([G.sel, model.byKey.get(G.sel)?.parent?.id].filter(Boolean)) : null;
+		const ringHtml = model.rings.map((r) => `<circle class="gring" cx="${model.extent}" cy="${model.extent}" r="${r.r}"/>`).join('');
+		const edgeHtml = model.edges.map(({ a, b, count }) => {
+			const hot = focus && (focus.has(a.id) || focus.has(b.id));
+			return `<line class="gedge ${hot ? 'hot' : ''}" x1="${a.cx}" y1="${a.cy}" x2="${b.cx}" y2="${b.cy}"><title>${esc(a.name)} → ${esc(b.name)}: ${count} students</title></line>`;
+		}).join('');
+		const short = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+		const dot = (n, r) => {
+			const total = n.people.length || 1;
+			const p = n.done / total;
+			const m = mine.get(n.id);
+			// fill opacity: how many validated it; the viewer's own state wins
+			const style = m ? '' : `style="--p:${(0.12 + p * 0.55).toFixed(2)}"`;
+			return `<g class="${nodeClass(n, mine, G.sel)}" data-act="graph-node" data-pid="${esc(n.id)}" transform="translate(${n.cx} ${n.cy})" ${style}>
+				<title>${esc(n.name)} — ${fmtNum(n.done)} validated, ${fmtNum(n.working)} working, ${fmtNum(n.searching)} need a team</title>
+				${n.exam ? `<rect x="-32" y="-12" width="64" height="24" rx="12"/>` : `<circle r="${r}"/>`}
+				<text y="3">${esc(short(n.name.replace(/^Exam Rank /, 'Rank '), n.exam ? 9 : r > 15 ? 12 : 5))}</text>
+				${n.searching ? `<circle class="gpip" cx="${r * 0.75}" cy="${-r * 0.75}" r="5"/>` : ''}
+			</g>`;
+		};
+		const nodeHtml = model.items.map((n) => {
+			if (n.group) {
+				return `<g class="gcluster ${focus?.has(n.id) ? 'sel' : ''}">
+					<circle class="gc-halo" cx="${n.cx}" cy="${n.cy}" r="${n.r}" data-act="graph-node" data-pid="${esc(n.id)}"><title>${esc(n.name)}</title></circle>
+					${n.members.map((m) => dot(m, 10)).join('')}
+					<text class="gc-label" x="${n.cx}" y="${n.cy + n.r + 11}">${esc(short(n.name, 18))}</text></g>`;
+			}
+			return dot(n, 30);
+		}).join('');
+		// zoom 1 fits the whole graph in the viewport
+		const px = `calc((100vh - 230px) * ${G.zoom})`;
+		return `
+			${toolbar}
+			<div class="graph-layout">
+				<div class="graph-scroll" data-drag>
+					<svg class="graph-svg" viewBox="0 0 ${model.size} ${model.size}" style="width:${px};height:${px}">
+						${ringHtml}${edgeHtml}${nodeHtml}
+					</svg>
+				</div>
+				<aside class="graph-panel">${renderGraphPanel(model, me, mine)}</aside>
+			</div>
+			<div class="graph-legend field-hint">
+				<span><span class="lg me-done"></span>you validated</span><span><span class="lg me-working"></span>you work on it</span>
+				<span><span class="lg shade"></span>otherwise: darker = validated by more students</span><span><span class="lg pip team">&nbsp;</span>someone needs a team</span>
+				<span>Rings are ranks, rebuilt from your data (the 42 API doesn't expose the intra's graph): a project sits on the ring matching the exams students had validated when starting it. Scroll or drag to move around.</span>
+			</div>`;
+	}
 
 	function explorerData(kind) {
 		const ex = S.explorer[kind];
@@ -1522,8 +2013,8 @@
 		if (tab) S.drawer.tab = tab;
 		if (!sameStudent) S.drawer.q = '';
 		// prev/next follow the list currently on screen
-		S.drawer.nav = S.view === 'students'
-			? visibleStudents().map((x) => x.id)
+		S.drawer.nav = S.view === 'students' || S.view === 'cursus' || S.view === 'graph'
+			? (S.view === 'cursus' ? cursusRows() : visibleStudents()).map((x) => x.id)
 			: [...new Set(explorerData(S.view).rows.map((r) => r.u.id))];
 		renderDrawer();
 		showSheet('#student-drawer');
@@ -1736,7 +2227,7 @@
 						</div>`).join('')}
 				</section>` : ''}
 			${loaded ? `
-				<section class="ov-section">
+					<section class="ov-section">
 					<h4>Cursus <span class="muted">${u.cursus_users.length}</span></h4>
 					${u.cursus_users.length ? sortBy(u.cursus_users, (c) => c.begin_at, 'desc').map(renderCursus).join('') : '<p class="muted">Not enrolled in any cursus.</p>'}
 				</section>
@@ -1753,8 +2244,9 @@
 						</div>
 					</section>` : ''}
 				${extras.map(([title, items, name]) => `<section class="ov-section"><h4>${title}</h4><div class="badges">${listOf(items, name)}</div></section>`).join('')}` : `
-				<div class="srow-placeholder"><i class="fa fa-bolt"></i>Cursus, level, skills and achievements appear after a full scan.
-					<button class="btn btn-primary btn-xs" data-act="fullscan-on" style="margin-left:auto">Run full scan</button></div>`}`;
+				<div class="srow-placeholder"><i class="fa fa-bolt"></i>${LZ.on && !LZ.failed.has(u.id) ? 'Fetching this profile…' : 'Cursus, level, skills and achievements need the profile.'}
+					<button class="btn btn-xs" data-act="fetch-one" data-id="${u.id}" style="margin-left:auto">Fetch this profile</button>
+					<button class="btn btn-primary btn-xs" data-act="fullscan-on">Run full scan</button></div>`}`;
 	}
 
 	/** A raw field value: links, emails and dates are shown as such. */
@@ -3087,7 +3579,7 @@
 					${row('Export students', 'E')}
 					${row('Search students', '/')}
 					<h4>Navigation</h4>
-					${row('Students · Exams · Projects', '1', '2', '3')}
+					${row('Students · Cursus · Graph · Exams · Projects', '1', '2', '3', '4', '5')}
 					${row('Toggle cards / table', 'G')}
 					${row('Next / previous student', 'J', 'K')}
 					${row('Browse enlarged photos', '←', '→')}
@@ -3256,6 +3748,13 @@
 			case 'sort-dir': setSort(S.sort.key, S.sort.dir === 'asc' ? 'desc' : 'asc'); break;
 			case 'th-sort': {
 				if (d.scope === 'students') { setSort(d.key); break; }
+				if (d.scope === 'cursus') {
+					const C = S.cursus;
+					C.sort = C.sort.key === d.key ? { key: d.key, dir: C.sort.dir === 'asc' ? 'desc' : 'asc' } : { key: d.key, dir: ['level', 'pace', 'days'].includes(d.key) ? 'desc' : 'asc' };
+					C.page = 1;
+					renderView();
+					break;
+				}
 				const target = d.scope === 'drawer' ? S.drawer : S.explorer[d.scope];
 				const numericFirst = ['mark', 'date', 'avg', 'occ', 'result'].includes(d.key) || d.key.startsWith('col:');
 				target.sort = target.sort.key === d.key
@@ -3267,6 +3766,7 @@
 			case 'page': {
 				const page = Number(d.page);
 				if (d.scope === 'students') { S.page = page; syncUrl(); }
+				else if (d.scope === 'cursus') S.cursus.page = page;
 				else S.explorer[d.scope === 'matrix' ? S.view : d.scope].page = page;
 				renderView();
 				$('#scroller').scrollTo({ top: 0, behavior: 'smooth' });
@@ -3287,6 +3787,13 @@
 			}
 			case 'chip-restore': setParam(S.staged, d.k, getParam(S.applied, d.k)); stagedChanged(); break;
 			case 'fullscan-on': applyNow((p) => setParam(p, 'fullscan', '')); break;
+			case 'autofetch': setAutoFetch(!LZ.on); break;
+			case 'fetch-one': LZ.failed.delete(Number(d.id)); setAutoFetch(true); break;
+			case 'co-filter': S.cursus.status = d.status; S.cursus.sort = { key: 'date', dir: d.status === 'upcoming' ? 'asc' : 'desc' }; S.cursus.page = 1; renderView(); break;
+			case 'graph-node': S.graph.sel = d.pid || null; S.graph.show = {}; renderView(); break;
+			case 'graph-zoom': S.graph.zoom = Number(d.delta) ? Math.min(2.5, Math.max(0.5, S.graph.zoom + Number(d.delta))) : 1; renderView(); break;
+			
+			case 'graph-more': S.graph.show[d.state] = !S.graph.show[d.state]; renderView(); break;
 			case 'remove-unknown': applyNow((p) => { for (const k of S.meta.unknownKeys) setParam(p, k, null); }); break;
 			case 'dismiss': S.noticeDismissed[d.notice] = true; store.set('dismissed', S.noticeDismissed); renderNotices(); break;
 			case 'retry': S.loadedKey = null; load(); break;
@@ -3496,6 +4003,9 @@
 			case 'ex-best': ex.best = value; ex.page = 1; renderView(); break;
 			case 'mon-live': setMonitorOn(value); break;
 			case 'mon-interval': setMonitorInterval(Number(value)); break;
+			case 'graph-me': S.graph.me = value.trim(); store.set('me', S.graph.me); renderView(); break;
+			case 'graph-min': S.graph.minPeople = Number(value); graphCache = null; renderView(); break;
+			case 'graph-active': S.graph.onlyActive = value; renderView(); break;
 			case 'dr-q': S.drawer.q = value; rerenderDrawer(); break;
 			case 'dr-status': S.drawer.status = value; renderDrawer(); break;
 			case 'dr-matching': S.drawer.onlyMatching = value; renderDrawer(); break;
@@ -3553,7 +4063,7 @@
 		switch (ev.key) {
 			case '/': ev.preventDefault(); $('#quick-search').focus(); $('#quick-search').select(); break;
 			case 'f': case 'F': ev.preventDefault(); S.panelOpen ? closeSheets() : openFilterPanel(); break;
-			case '1': case '2': case '3': closeSheets(); switchView(VIEWS[Number(ev.key) - 1]); break;
+			case '1': case '2': case '3': case '4': case '5': closeSheets(); switchView(VIEWS[Number(ev.key) - 1]); break;
 			case 'g': case 'G': if (S.view === 'students') setDisplay(S.display === 'grid' ? 'table' : 'grid'); break;
 			case 'j': case 'ArrowDown': if (drawerOpen) { ev.preventDefault(); drawerStep(1); } break;
 			case 'k': case 'ArrowUp': if (drawerOpen) { ev.preventDefault(); drawerStep(-1); } break;
@@ -3568,6 +4078,21 @@
 	window.addEventListener('blur', () => document.body.classList.remove('mod-key'));
 	$('#scroller').addEventListener('scroll', closeMenu, { passive: true });
 
+	// drag the graph around instead of using its scrollbars
+	let panning = null;
+	document.addEventListener('pointerdown', (ev) => {
+		const box = ev.target.closest?.('[data-drag]');
+		if (!box || ev.button !== 0 || ev.target.closest('button')) return;
+		panning = { box, x: ev.clientX, y: ev.clientY, left: box.scrollLeft, top: box.scrollTop };
+		box.classList.add('dragging');
+	});
+	document.addEventListener('pointermove', (ev) => {
+		if (!panning) return;
+		panning.box.scrollLeft = panning.left - (ev.clientX - panning.x);
+		panning.box.scrollTop = panning.top - (ev.clientY - panning.y);
+	});
+	document.addEventListener('pointerup', () => { panning?.box.classList.remove('dragging'); panning = null; });
+
 	window.addEventListener('popstate', () => {
 		readUrl();
 		visibleCache = null;
@@ -3581,5 +4106,6 @@
 	if (![25, 50, 100].includes(S.pageSize.table)) S.pageSize.table = 50;
 	readUrl();
 	renderTabs();
+	renderAutoFetch();
 	load();
 })();

@@ -39,7 +39,8 @@
 			</label>
 
 			<div class="appbar-actions">
-				<button class="btn btn-ghost icon-btn" id="btn-shortcuts" title="Keyboard shortcuts (?)"><i class="fa fa-keyboard-o"></i></button>
+				<button class="btn btn-ghost" id="btn-autofetch" data-act="autofetch" title="Auto-fetch"></button>
+					<button class="btn btn-ghost icon-btn" id="btn-shortcuts" title="Keyboard shortcuts (?)"><i class="fa fa-keyboard-o"></i></button>
 				<button class="btn btn-ghost icon-btn" id="btn-theme" title="Toggle theme"><i class="fa fa-adjust"></i></button>
 				<button class="btn btn-primary" id="btn-filters" title="Filters (F)">
 					<i class="fa fa-sliders"></i><span>Filters</span><span class="count-badge" id="filter-count" hidden></span>
@@ -49,6 +50,8 @@
 
 		<nav class="tabs" id="view-tabs" role="tablist">
 			<button role="tab" data-view="students"><i class="fa fa-users"></i>Students <span class="tab-count" data-count="students"></span></button>
+			<button role="tab" data-view="cursus"><i class="fa fa-line-chart"></i>Cursus <span class="tab-count" data-count="cursus"></span></button>
+			<button role="tab" data-view="graph"><i class="fa fa-sitemap"></i>Project graph</button>
 			<button role="tab" data-view="exams"><i class="fa fa-graduation-cap"></i>Exams <span class="tab-count" data-count="exams"></span></button>
 			<button role="tab" data-view="projects"><i class="fa fa-folder-open-o"></i>Projects <span class="tab-count" data-count="projects"></span></button>
 		</nav>

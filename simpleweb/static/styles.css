@@ -1099,3 +1099,145 @@ tr.flash > td { animation: row-flash 2.5s ease-out; }
 .feed-sub { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 3px; font-size: 13px; }
 .feed-mark { flex: none; min-width: 120px; }
 @media (max-width: 640px) { .feed-mark { min-width: 84px; } .mon-active { margin-left: 0; } }
+
+/* ==========================================================================
+   Auto-fetch, cursus tracker & project graph
+   ========================================================================== */
+
+#btn-autofetch { font-size: 12px; gap: 6px; color: var(--muted); }
+#btn-autofetch.active { color: var(--accent); }
+#btn-autofetch .spinner-sm { margin-right: 0; }
+
+.coverage { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.help-box { margin-bottom: 12px; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text-2); font-size: 13px; }
+.help-box b { color: var(--text); }
+.lvl-cell { display: inline-flex; align-items: center; gap: 8px; }
+.lvl-cell .lvl-bar { width: 48px; flex: none; }
+.btn.active { border-color: var(--accent); color: var(--accent); }
+
+.runway { display: flex; flex-direction: column; gap: 3px; min-width: 120px; }
+.runway small { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rw-track { position: relative; display: block; height: 6px; border-radius: 6px; background: var(--surface-3); }
+.rw-eta { position: absolute; inset: 0 auto 0 0; border-radius: 6px; background: var(--ok); opacity: .85; }
+.rw-eta.bad { background: var(--bad); }
+.rw-bh { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--text); border-radius: 2px; }
+
+.progress-line { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.progress-line .lvl-track { flex: 1; }
+.progress-now { margin-top: 10px; font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.progress-now .k { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+
+/* Project graph: rank columns, a ring per project */
+.graph-layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 14px; align-items: start; }
+.graph-scroll {
+	overflow: auto; max-height: calc(100vh - 210px); min-height: 380px; cursor: grab;
+	background: radial-gradient(circle at 20% 0%, color-mix(in srgb, var(--accent) 7%, var(--surface)), var(--surface) 60%);
+	border: 1px solid var(--border); border-radius: var(--radius);
+}
+.graph-scroll.dragging { cursor: grabbing; user-select: none; }
+.graph-canvas { position: relative; }
+.graph-edges { position: absolute; inset: 0; pointer-events: none; }
+.gedge { fill: none; stroke: var(--border-strong); stroke-width: 1.5; opacity: .55; }
+.gedge.hot { stroke: var(--accent); stroke-width: 2.5; opacity: 1; }
+.gcol {
+	position: absolute; top: 14px; padding-bottom: 6px; text-align: center; border-bottom: 1px solid var(--border);
+	font-size: 11px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
+}
+.gn { position: absolute; display: flex; flex-direction: column; align-items: center; gap: 6px; background: none; border: 0; color: var(--text); text-align: center; }
+button.gn { cursor: pointer; }
+.disc {
+	position: relative; width: 54px; height: 54px; border-radius: 50%; flex: none;
+	background: conic-gradient(var(--ok) calc(var(--p) * 1%), var(--surface-3) 0);
+	display: grid; place-items: center; transition: transform .12s, box-shadow .12s;
+}
+.disc .in {
+	display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%;
+	background: var(--surface-2); font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums;
+}
+.disc.me-done .in { background: var(--ok); color: #fff; }
+.disc.me-working .in, .disc.me-searching .in { background: var(--info); color: #fff; }
+.disc.me-failed .in { background: var(--bad-soft); }
+.gnode:hover .disc { transform: scale(1.07); }
+.gnode.sel .disc { box-shadow: 0 0 0 3px var(--bg), 0 0 0 5px var(--accent); }
+.gnode.exam .in { border: 1.5px dashed var(--border-strong); }
+.gl { font-size: 12px; font-weight: 550; line-height: 1.25; max-width: 140px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.pip {
+	position: absolute; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; border: 2px solid var(--surface);
+	display: grid; place-items: center; font-size: 10px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums;
+}
+.pip.work { background: var(--info); right: -8px; top: -4px; }
+.pip.team { background: var(--warn); right: -8px; bottom: -4px; }
+.gcluster { gap: 8px; }
+.gcl-head { background: none; border: 0; color: var(--text); font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
+.gcl-head small { color: var(--muted); font-weight: 500; }
+.gcluster.sel .gcl-head { color: var(--accent); }
+.gdots { display: flex; flex-wrap: wrap; justify-content: center; gap: 5px; padding: 8px; border: 1px solid var(--border-strong); border-radius: 22px; background: var(--surface-2); }
+.gdot {
+	width: 14px; height: 14px; border-radius: 50%; border: 0; padding: 0; cursor: pointer;
+	background: conic-gradient(var(--ok) calc(var(--p) * 1%), var(--surface-3) 0);
+}
+.gdot.me-done { background: var(--ok); }
+.gdot.me-working, .gdot.me-searching { background: var(--info); }
+.gdot.sel { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.graph-panel {
+	position: sticky; top: 0; max-height: calc(100vh - 210px); overflow: auto;
+	background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px;
+	display: flex; flex-direction: column; gap: 12px;
+}
+.gpanel-empty { text-align: center; color: var(--text-2); padding: 18px 6px; display: flex; flex-direction: column; gap: 8px; }
+.gpanel-empty .fa { font-size: 26px; color: var(--muted); }
+.gpanel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.gpanel-head h3 { font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
+.gstats-line { display: flex; flex-wrap: wrap; gap: 6px; }
+.gsection h4 { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 6px; }
+.gmembers { display: flex; flex-direction: column; gap: 4px; }
+.gmember { display: flex; justify-content: space-between; gap: 8px; padding: 6px 10px; text-align: left; cursor: pointer; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 13px; }
+.gmember small { color: var(--muted); }
+.gmember.me-done { border-color: var(--ok); }
+.gmember.me-working, .gmember.me-searching { border-color: var(--info); }
+.gperson {
+	display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 8px; margin-bottom: 2px;
+	text-align: left; cursor: pointer; background: transparent; border: 1px solid transparent; border-radius: 8px; color: var(--text);
+}
+.gperson:hover { background: var(--surface-2); border-color: var(--border); }
+.gperson .who { display: flex; flex-direction: column; min-width: 0; flex: 1; line-height: 1.25; }
+.gperson .who small { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gperson .meta { display: flex; align-items: center; gap: 6px; font-size: 12px; flex: none; }
+.gperson .gap { color: var(--muted); font-variant-numeric: tabular-nums; }
+.gperson .gap.near { color: var(--ok); font-weight: 600; }
+
+.graph-legend { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; margin-top: 10px; }
+.graph-legend .lg { display: inline-block; width: 14px; height: 14px; border-radius: 50%; margin-right: 6px; vertical-align: -3px; }
+.lg.ring { background: conic-gradient(var(--ok) 60%, var(--surface-3) 0); }
+.lg.pip { position: static; display: inline-grid; width: 16px; height: 16px; font-size: 9px; }
+.lg.pip.work { background: var(--info); }
+.lg.pip.team { background: var(--warn); }
+.lg.me-done { background: var(--ok); }
+.lg.me-working { background: var(--info); }
+.toolbar-group.check { gap: 8px; font-size: 13px; color: var(--text-2); cursor: pointer; }
+
+@media (max-width: 1000px) {
+	.graph-layout { grid-template-columns: minmax(0, 1fr); }
+	.graph-panel { position: static; max-height: none; }
+}
+/* Radial graph (SVG) */
+.graph-svg { display: block; margin: 0 auto; }
+.graph-svg .gring { fill: none; stroke: var(--accent); stroke-opacity: .35; stroke-width: 1; }
+.graph-svg .gedge { stroke: var(--border-strong); stroke-width: 1.2; opacity: .45; }
+.graph-svg .gedge.hot { stroke: var(--accent); stroke-width: 2.2; opacity: 1; }
+.graph-svg .gnode { cursor: pointer; --p: .2; }
+.graph-svg .gnode circle, .graph-svg .gnode rect { fill: color-mix(in srgb, var(--accent) calc(var(--p) * 100%), var(--surface-3)); stroke: var(--border-strong); stroke-width: 1.5; transition: stroke .1s; }
+.graph-svg .gnode text { fill: var(--text); font-size: 9px; font-weight: 600; text-anchor: middle; pointer-events: none; }
+.graph-svg .gnode:hover circle, .graph-svg .gnode:hover rect { stroke: var(--text); }
+.graph-svg .gnode.me-done circle, .graph-svg .gnode.me-done rect { fill: var(--accent); stroke: var(--accent); }
+.graph-svg .gnode.me-done text { fill: var(--accent-ink); }
+.graph-svg .gnode.me-working circle, .graph-svg .gnode.me-searching circle, .graph-svg .gnode.me-working rect { stroke: var(--text); stroke-width: 3; }
+.graph-svg .gnode.me-failed circle, .graph-svg .gnode.me-failed rect { fill: color-mix(in srgb, var(--bad) 55%, var(--surface-3)); }
+.graph-svg .gnode.sel circle, .graph-svg .gnode.sel rect { stroke: var(--warn); stroke-width: 3.5; }
+.graph-svg .gpip { fill: var(--warn); stroke: var(--surface); stroke-width: 1.5; pointer-events: none; }
+.graph-svg .gc-halo { fill: color-mix(in srgb, var(--surface-3) 40%, transparent); stroke: var(--border-strong); cursor: pointer; }
+.graph-svg .gcluster.sel .gc-halo { stroke: var(--warn); stroke-width: 2.5; }
+.graph-svg .gc-label { fill: var(--text-2); font-size: 10px; font-weight: 600; text-anchor: middle; pointer-events: none; }
+.lg.shade { background: color-mix(in srgb, var(--accent) 45%, var(--surface-3)); }
