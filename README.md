@@ -35,6 +35,19 @@ The students list from the 42 API does not include exams, projects or levels. En
 fetches each matching student's profile (one API request per student, ~2 requests/second).
 Field filters are applied *before* fetching: narrow the list down first (e.g. `pool_year`).
 
+Without a full scan, profiles already in the cache are shown anyway (whatever their age), and
+**Auto-fetch** (top right) fetches the missing profiles of the students on screen in the background
+while you browse. The Cursus and Project graph tabs auto-fetch up to 400 students at a time: narrow the
+list down (e.g. by pool year) or run a full scan for bigger campuses.
+
+## Cursus tracker & project graph
+
+- **Cursus** tab: who is about to start the 42cursus (with the start date) and who got blackholed (cursus ended at the blackhole date). The API's blackhole date is no longer a deadline (the intra uses milestones, which the API doesn't expose), so no countdown is shown.
+- **Project graph** tab: the 42API doesn't expose the intra's graph, so projects are placed by when
+  students usually start them and linked by the project that most often comes next. Pick a project to
+  see who is looking for a team, who is working on it and who already validated it; set your login to
+  highlight your progress and sort people by how close their level is to yours.
+
 ### Cache and rescans
 
 Nothing fetched is ever thrown away, and data counts as outdated after `CACHE_EXPIRATION_HOURS`
